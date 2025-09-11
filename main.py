@@ -180,11 +180,21 @@ async def debug_info():
         },
         "warnings": [
             warning for warning in [
-                "Using default WEBHOOK_VERIFY_TOKEN" if WEBHOOK_VERIFY_TOKEN == "default_token" else None,
-                "APP_SECRET not set" if not APP_SECRET else None,
-                "ACCESS_TOKEN not set" if not ACCESS_TOKEN else None
+                "Using default WEBHOOK_VERIFY_TOKEN" if current_webhook_token == "default_token" else None,
+                "APP_SECRET not set" if not current_app_secret else None,
+                "ACCESS_TOKEN not set" if not current_access_token else None,
+                "Cached and fresh webhook token values don't match" if WEBHOOK_VERIFY_TOKEN != current_webhook_token else None,
+                "Cached and fresh app secret values don't match" if APP_SECRET != current_app_secret else None,
+                "Cached and fresh access token values don't match" if ACCESS_TOKEN != current_access_token else None,
             ] if warning
-        ]
+        ],
+        "railway_env_check": {
+            "all_env_vars_count": len(os.environ),
+            "railway_vars": {
+                var: os.getenv(var, "NOT_SET") 
+                for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"]
+            }
+        }
     }
 
 @app.get("/test-webhook")
