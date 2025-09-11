@@ -37,17 +37,14 @@ async def root():
         }
     }
 
-@app.get("/health")
-async def health():
-    """Health check endpoint"""
+@app.get("/test-webhook")
+async def test_webhook_verification():
+    """Test webhook verification manually"""
     return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": {
-            "has_verify_token": bool(WEBHOOK_VERIFY_TOKEN and WEBHOOK_VERIFY_TOKEN != "default_token"),
-            "has_app_secret": bool(APP_SECRET),
-            "has_access_token": bool(ACCESS_TOKEN)
-        }
+        "webhook_verify_token": WEBHOOK_VERIFY_TOKEN,
+        "app_secret_set": bool(APP_SECRET),
+        "access_token_set": bool(ACCESS_TOKEN),
+        "test_verification_url": f"/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123"
     }
 
 @app.get("/webhook")
