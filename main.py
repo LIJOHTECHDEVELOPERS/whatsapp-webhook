@@ -7,8 +7,9 @@ import logging
 import sys
 import aiohttp
 from datetime import datetime
-from typing import Dict, Any
-from urllib.parse import quote  # For URL encoding domain params
+from typing import Dict, Any, Optional
+from urllib.parse import quote, urlencode
+import re  # For simple state management helpers
 
 # Configure detailed logging
 logging.basicConfig(
@@ -28,7 +29,7 @@ app = FastAPI(
 )
 
 # Add CORS middleware (filter empty origins)
-allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://your-frontend-domain.com").split(",") if origin.strip()]
+allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://digikenya.co.ke").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -36,6 +37,16 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+# Supported .ke extensions (from your original code)
+SUPPORTED_EXTENSIONS = [
+    ".co.ke", ".or.ke", ".ac.ke", ".go.ke", ".ne.ke", ".sc.ke",
+    ".ke", ".me.ke", ".info.ke"
+]
+
+# Simple in-memory state store (user phone -> state dict; resets on restart)
+# In production, replace with Redis/DB for persistence
+user_states: Dict[str, Dict[str, Any]] = {}
 
 # Debug environment variables loading
 def debug_environment():
@@ -124,6 +135,25 @@ async def startup_event():
     logger.info("🎉 APPLICATION STARTING UP")
     logger.info(f"FastAPI app starting at {datetime.utcnow().isoformat()}")
 
+def get_user_state(user_phone: str) -> Dict[str, Any]:
+    """Get or initialize user state"""
+    if user_phone not in user_states:
+        user_states[user_phone] = {
+            "step": "greeting",  # greeting, searching, results, registering
+            "last_domain": None,
+            "selected_extension": None
+        }
+    return user_states[user_phone]
+
+def update_user_state(user_phone: str, state: Dict[str, Any]):
+    """Update user state"""
+    user_states[user_phone] = {**get_user_state(user_phone), **state}
+
+def is_greeting(text: str) -> bool:
+    """Check if message is a greeting"""
+    greetings = ["hi", "hello", "hey", "hii", "helloo", "start", "begin"]
+    return text.lower().strip() in greetings or len(text.strip()) < 3
+
 @app.get("/")
 async def root():
     """Root endpoint with comprehensive system info"""
@@ -209,7 +239,8 @@ async def debug_info():
                 var: os.getenv(var, "NOT_SET")
                 for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"]
             }
-        }
+        },
+        "active_users": len(user_states)
     }
 
 @app.get("/test-webhook")
@@ -286,7 +317,7 @@ async def verify_webhook(
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Handle incoming WhatsApp webhooks with domain bot logic"""
+    """Handle incoming WhatsApp webhooks with conversational domain bot logic"""
     logger.info("📨 INCOMING WEBHOOK")
     
     try:
@@ -354,92 +385,147 @@ async def handle_webhook(request: Request):
                             logger.info(f"            ID: {msg_id}")
                             logger.info(f"            Timestamp: {timestamp}")
                             
+                            # Handle interactive button responses
+                            if msg_type == "interactive":
+                                interactive = message.get("interactive", {})
+                                if interactive.get("type") == "button_reply":
+                                    reply_data = interactive.get("button_reply", {})
+                                    payload = reply_data.get("id", "")
+                                    logger.info(f"            🔘 Button clicked: {payload}")
+                                    state = get_user_state(sender)
+                                    if payload == "search_domains":
+                                        update_user_state(sender, {"step": "searching"})
+                                        reply_text = "🔍 Great! What domain would you like to check? (e.g., 'example' for .ke extensions)"
+                                        await send_whatsapp_reply(sender, reply_text, msg_id)
+                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
+                                    elif payload == "visit_website":
+                                        reply_text = "🌐 Visit our website to browse all services: https://digikenya.co.ke\n\nOr reply 'menu' to return to main options."
+                                        await send_whatsapp_reply(sender, reply_text, msg_id)
+                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
+                                    elif payload.startswith("register_"):
+                                        domain = payload.replace("register_", "")
+                                        register_url = f"https://digikenya.co.ke/register?domain={quote(domain)}"
+                                        reply_text = f"🛒 Ready to register {domain}? Click here: {register_url}\n\nOr reply 'menu' for more options."
+                                        await send_whatsapp_reply(sender, reply_text, msg_id)
+                                        update_user_state(sender, {"step": "greeting"})
+                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
+                                    else:
+                                        logger.warning(f"Unknown button payload: {payload}")
+                            
                             if msg_type == "text":
                                 text_content = message.get("text", {})
                                 text_body = text_content.get("body", "").strip().lower()
                                 logger.info(f"            📝 Text: '{text_body}'")
                                 
-                                if text_body.endswith('.ke') or '.' not in text_body:
-                                    domain_query = text_body if text_body.endswith('.ke') else f"{text_body}.ke"
-                                    logger.info(f"🤖 Domain check requested: {domain_query}")
-                                    
-                                    # FIXED: Use GET with query params (URL-encoded domain)
-                                    domain_result = {"available": False, "error": "Unknown error"}
-                                    try:
-                                        params = {
-                                            "domain": quote(domain_query),  # URL-safe encode
-                                            "include_pricing": "true",
-                                            "include_suggestions": "true"
-                                        }
-                                        api_url = f"{DOMAIN_CHECK_URL}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
-                                        logger.info(f"🔗 Calling domain API: {api_url}")
-                                        async with aiohttp.ClientSession() as session:
-                                            async with session.get(
-                                                DOMAIN_CHECK_URL,
-                                                params=params,
-                                                timeout=aiohttp.ClientTimeout(total=10)
-                                            ) as resp:
-                                                logger.info(f"📡 Domain API response status: {resp.status}")
-                                                if resp.status == 200:
-                                                    api_response = await resp.json()
-                                                    logger.info(f"📊 Domain API response preview: {json.dumps(api_response, indent=2)[:500]}...")
-                                                    if api_response.get("success"):
-                                                        domain_result = api_response.get("data", {})
-                                                    else:
-                                                        domain_result = {"error": api_response.get("error", "API error")}
-                                                else:
-                                                    error_text = await resp.text()
-                                                    logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")
-                                                    domain_result = {"error": f"HTTP {resp.status}: {error_text[:100] if len(error_text) > 100 else error_text}"}
-                                    except Exception as domain_error:
-                                        logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
-                                        domain_result = {"error": "Service unavailable"}
-                                    
-                                    # FIXED: Parse suggestions as list of dicts, extract 'domain'
-                                    if domain_result.get("error"):
-                                        reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Try again later!"
-                                    elif domain_result.get("available", False):
-                                        price = domain_result.get("price", domain_result.get("pricing", {}).get("first_year", "N/A"))
-                                        reply_text = f"✅ {domain_query} is AVAILABLE!\n💰 First year: {price}\n\nReply 'register {domain_query}' to start registration (or check another)."
-                                    else:
-                                        suggestions = domain_result.get("suggestions", [])
-                                        reply_text = f"❌ {domain_query} is NOT available.\n\n"
-                                        if suggestions:
-                                            # Extract domain names from suggestion dicts
-                                            sug_domains = [s.get("domain", "") for s in suggestions if isinstance(s, dict)][:3]
-                                            if sug_domains:
-                                                reply_text += f"💡 Suggestions: {', '.join(sug_domains)}\n"
-                                        reply_text += "Try another .ke domain!"
-                                    
-                                    if PHONE_NUMBER_ID and ACCESS_TOKEN:
-                                        try:
-                                            await send_whatsapp_reply(sender, reply_text, msg_id)
-                                            logger.info(f"✅ Domain reply sent to {sender} for {domain_query}")
-                                        except Exception as reply_error:
-                                            logger.error(f"Failed to send domain reply: {str(reply_error)}", exc_info=True)
-                                    else:
-                                        logger.warning(f"⚠️ Skipping reply to {sender} - PHONE_NUMBER_ID or ACCESS_TOKEN missing")
-                                else:
-                                    help_text = (
-                                        "Hi! I'm a .ke domain availability bot. "
-                                        "Send me a domain like 'example.ke' (or just 'example') to check if it's available. "
-                                        "Powered by DigiKenya."
+                                state = get_user_state(sender)
+                                logger.info(f"            🗂️ User state: {state}")
+                                
+                                # Greeting/First message or menu request
+                                if is_greeting(text_body) or text_body == "menu":
+                                    update_user_state(sender, {"step": "greeting"})
+                                    extensions_list = "\n".join([f"• {ext}" for ext in SUPPORTED_EXTENSIONS])
+                                    reply_text = (
+                                        f"👋 Hi! Welcome to DigiKenya Domain Bot.\n\n"
+                                        f"Available .ke extensions you can register:\n"
+                                        f"{extensions_list}\n\n"
+                                        f"What would you like to do?"
                                     )
-                                    if PHONE_NUMBER_ID and ACCESS_TOKEN:
+                                    # Send with buttons
+                                    await send_interactive_reply(sender, reply_text, msg_id, [
+                                        {"id": "search_domains", "title": "🔍 Search Domains"},
+                                        {"id": "visit_website", "title": "🌐 Visit Website"}
+                                    ])
+                                    return JSONResponse({"status": "success", "processed_entries": len(entries)})
+                                
+                                # Handle search step
+                                if state.get("step") == "searching":
+                                    # Extract domain from text (e.g., "example" or "example.ke")
+                                    domain_match = re.match(r'^([a-z0-9-]+\.?)(ke|co\.ke|or\.ke|ac\.ke|go\.ke|ne\.ke|sc\.ke|me\.ke|info\.ke)?$', text_body)
+                                    if domain_match:
+                                        domain_query = domain_match.group(1)
+                                        if not domain_match.group(2):
+                                            domain_query += ".ke"  # Default to .ke
+                                        logger.info(f"🤖 Domain search for: {domain_query}")
+                                        
+                                        # Call domain API
+                                        domain_result = {"available": False, "error": "Unknown error"}
                                         try:
-                                            await send_whatsapp_reply(sender, help_text, msg_id)
-                                            logger.info(f"ℹ️ Help reply sent to {sender}")
-                                        except Exception as help_error:
-                                            logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
+                                            params = {
+                                                "domain": quote(domain_query),
+                                                "include_pricing": "true",
+                                                "include_suggestions": "true"
+                                            }
+                                            api_url = f"{DOMAIN_CHECK_URL}?{urlencode(params)}"
+                                            logger.info(f"🔗 Calling domain API: {api_url}")
+                                            async with aiohttp.ClientSession() as session:
+                                                async with session.get(
+                                                    DOMAIN_CHECK_URL,
+                                                    params=params,
+                                                    timeout=aiohttp.ClientTimeout(total=10)
+                                                ) as resp:
+                                                    logger.info(f"📡 Domain API response status: {resp.status}")
+                                                    if resp.status == 200:
+                                                        api_response = await resp.json()
+                                                        logger.info(f"📊 Domain API response preview: {json.dumps(api_response, indent=2)[:500]}...")
+                                                        if api_response.get("success"):
+                                                            domain_result = api_response.get("data", {})
+                                                        else:
+                                                            domain_result = {"error": api_response.get("error", "API error")}
+                                                    else:
+                                                        error_text = await resp.text()
+                                                        logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")
+                                                        domain_result = {"error": f"HTTP {resp.status}: {error_text[:100] if len(error_text) > 100 else error_text}"}
+                                        except Exception as domain_error:
+                                            logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
+                                            domain_result = {"error": "Service unavailable"}
+                                        
+                                        # Format results with button for registration
+                                        if domain_result.get("error"):
+                                            reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Reply 'menu' to start over."
+                                        elif domain_result.get("available", False):
+                                            price = domain_result.get("price", domain_result.get("pricing", {}).get("first_year", "N/A"))
+                                            reply_text = f"✅ {domain_query} is AVAILABLE!\n💰 First year: {price}\n\nReady to register?"
+                                            await send_interactive_reply(sender, reply_text, msg_id, [
+                                                {"id": f"register_{domain_query}", "title": "🛒 Register Now"}
+                                            ])
+                                            update_user_state(sender, {"step": "results", "last_domain": domain_query})
+                                        else:
+                                            suggestions = domain_result.get("suggestions", [])
+                                            reply_text = f"❌ {domain_query} is NOT available.\n\n"
+                                            if suggestions:
+                                                sug_domains = [s.get("domain", "") for s in suggestions if isinstance(s, dict)][:3]
+                                                if sug_domains:
+                                                    reply_text += f"💡 Suggestions: {', '.join(sug_domains)}\n"
+                                            reply_text += "Pick one to check or reply 'menu'."
+                                            # Add buttons for top suggestions
+                                            buttons = [{"id": f"register_{s.get('domain', '')}", "title": s.get("domain", "")[:20] + "..." if s.get("available") else "Taken"} for s in suggestions[:3] if s.get("available")]
+                                            if buttons:
+                                                await send_interactive_reply(sender, reply_text, msg_id, buttons)
+                                            else:
+                                                await send_whatsapp_reply(sender, reply_text, msg_id)
+                                            update_user_state(sender, {"step": "results", "last_domain": domain_query})
+                                        
+                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
                                     else:
-                                        logger.warning(f"⚠️ Skipping help reply to {sender} - PHONE_NUMBER_ID or ACCESS_TOKEN missing")
+                                        reply_text = "❌ Invalid domain format. Try something like 'example' or 'example.ke'. Reply 'menu' for options."
+                                        await send_whatsapp_reply(sender, reply_text, msg_id)
+                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
+                                
+                                # Default: Show menu
+                                reply_text = "👋 Hi! Reply 'menu' for main options or say 'hi' to start."
+                                await send_whatsapp_reply(sender, reply_text, msg_id)
+                                return JSONResponse({"status": "success", "processed_entries": len(entries)})
                                 
                             elif msg_type == "image":
                                 image_info = message.get("image", {})
                                 logger.info(f"            🖼️ Image ID: {image_info.get('id')}")
+                                reply_text = "📸 Thanks for the image! Reply 'menu' to continue with domain search."
+                                await send_whatsapp_reply(sender, reply_text, msg_id)
                             elif msg_type == "document":
                                 doc_info = message.get("document", {})
                                 logger.info(f"            📄 Document: {doc_info.get('filename')}")
+                                reply_text = "📄 Received your document! Reply 'menu' to continue with domain search."
+                                await send_whatsapp_reply(sender, reply_text, msg_id)
                         
                         statuses = value.get("statuses", [])
                         logger.info(f"      📊 Statuses: {len(statuses)}")
@@ -475,8 +561,53 @@ async def handle_webhook(request: Request):
             }
         )
 
+async def send_interactive_reply(to: str, message: str, replied_msg_id: str = None, buttons: list = None):
+    """Send interactive button reply via WhatsApp API"""
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
+        return
+    
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": message
+            },
+            "action": {
+                "buttons": buttons or []
+            }
+        }
+    }
+    
+    if replied_msg_id:
+        payload["context"] = {"message_id": replied_msg_id}
+    
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    reply_id = result.get('messages', [{}])[0].get('id')
+                    logger.info(f"✅ Interactive reply sent to {to}: ID {reply_id}")
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"❌ Failed to send interactive reply to {to}: {resp.status} - {error_text}")
+    except Exception as e:
+        logger.error(f"❌ Exception sending interactive reply to {to}: {str(e)}", exc_info=True)
+
 async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
-    """Send a reply message via WhatsApp Cloud API with graceful error handling"""
+    """Send a text reply via WhatsApp Cloud API with graceful error handling"""
     if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
         logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
         return
@@ -526,7 +657,9 @@ async def health_check():
         "version": "1.0.0",
         "bot_features": {
             "domain_check": bool(DOMAIN_CHECK_URL),
-            "whatsapp_replies": bool(ACCESS_TOKEN and PHONE_NUMBER_ID)
+            "whatsapp_replies": bool(ACCESS_TOKEN and PHONE_NUMBER_ID),
+            "interactive_buttons": True,
+            "active_users": len(user_states)
         }
     }
 
