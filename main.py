@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
 import logging
 import sys
-import aiohttp  # For async HTTP calls
+import aiohttp
 from datetime import datetime
 from typing import Dict, Any
 
@@ -23,6 +24,15 @@ app = FastAPI(
     title="WhatsApp Webhook",
     description="WhatsApp Business API Webhook with .ke Domain Bot",
     version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://your-frontend-domain.com").split(","),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Debug environment variables loading
@@ -44,6 +54,7 @@ def debug_environment():
         "PHONE_NUMBER_ID",
         "VERSION",
         "DOMAIN_CHECK_URL",
+        "ALLOWED_ORIGINS",
         "PORT",
         "RAILWAY_ENVIRONMENT",
         "RAILWAY_PROJECT_ID",
@@ -101,9 +112,9 @@ try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
     ACCESS_TOKEN = get_env_var("ACCESS_TOKEN", "")
-    PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", required=True)  # Required for replies
-    VERSION = get_env_var("VERSION", "v19.0")  # WhatsApp API version
-    DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "http://api.digikenya.co.ke/api/v1/domains/availability/check")  # Adjust to your domain app
+    PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", required=True)
+    VERSION = get_env_var("VERSION", "v19.0")
+    DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "http://api.digikenya.co.ke/api/v1/domains/availability/check")
     PORT = int(get_env_var("PORT", "8000"))
     
     logger.info(f"🚀 Configuration loaded successfully")
@@ -227,25 +238,21 @@ async def test_webhook_verification():
         "phone_number_id_set": bool(PHONE_NUMBER_ID),
         "domain_check_url": DOMAIN_CHECK_URL,
         "test_verification_url": f"/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
-        "full_test_url": f"https://https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
+        "full_test_url": f"https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
         "warnings": []
     }
     
     # Add warnings
     if WEBHOOK_VERIFY_TOKEN == "default_token":
-        test_info["warnings"].append("⚠️  Using default verification token - this should be changed in production!")
-    
+        test_info["warnings"].append("⚠️ Using default verification token - change in production!")
     if not APP_SECRET:
-        test_info["warnings"].append("⚠️  APP_SECRET not configured")
-        
+        test_info["warnings"].append("⚠️ APP_SECRET not configured")
     if not ACCESS_TOKEN:
-        test_info["warnings"].append("⚠️  ACCESS_TOKEN not configured")
-    
+        test_info["warnings"].append("⚠️ ACCESS_TOKEN not configured")
     if not PHONE_NUMBER_ID:
-        test_info["warnings"].append("⚠️  PHONE_NUMBER_ID not configured")
-    
+        test_info["warnings"].append("⚠️ PHONE_NUMBER_ID not configured")
     if not DOMAIN_CHECK_URL:
-        test_info["warnings"].append("⚠️  DOMAIN_CHECK_URL not configured")
+        test_info["warnings"].append("⚠️ DOMAIN_CHECK_URL not configured")
     
     logger.info(f"Test info: {json.dumps(test_info, indent=2)}")
     return test_info
@@ -267,39 +274,33 @@ async def verify_webhook(
     if not hub_mode:
         logger.error("❌ hub.mode parameter missing")
         raise HTTPException(status_code=400, detail="hub.mode parameter is required")
-        
     if not hub_verify_token:
         logger.error("❌ hub.verify_token parameter missing")
         raise HTTPException(status_code=400, detail="hub.verify_token parameter is required")
-        
     if not hub_challenge:
         logger.error("❌ hub.challenge parameter missing")
         raise HTTPException(status_code=400, detail="hub.challenge parameter is required")
     
-    if hub_mode == "subscribe":
-        if hub_verify_token == WEBHOOK_VERIFY_TOKEN:
-            logger.info("✅ Webhook verified successfully!")
-            logger.info(f"   Returning challenge: '{hub_challenge}'")
-            return PlainTextResponse(hub_challenge)
-        else:
-            logger.error("❌ Webhook verification failed - Token mismatch")
-            logger.error(f"   Expected: '{WEBHOOK_VERIFY_TOKEN}'")
-            logger.error(f"   Received: '{hub_verify_token}'")
-            raise HTTPException(
-                status_code=403, 
-                detail={
-                    "error": "Verification failed",
-                    "expected_token": WEBHOOK_VERIFY_TOKEN,
-                    "received_token": hub_verify_token
-                }
-            )
+    if hub_mode == "subscribe" and hub_verify_token == WEBHOOK_VERIFY_TOKEN:
+        logger.info("✅ Webhook verified successfully!")
+        logger.info(f"   Returning challenge: '{hub_challenge}'")
+        return PlainTextResponse(hub_challenge)
     else:
-        logger.error(f"❌ Invalid hub.mode: '{hub_mode}' (expected 'subscribe')")
-        raise HTTPException(status_code=400, detail=f"Invalid hub.mode: {hub_mode}")
+        logger.error(f"❌ Webhook verification failed - {'Invalid token' if hub_mode == 'subscribe' else 'Invalid hub.mode'}")
+        logger.error(f"   Expected: '{WEBHOOK_VERIFY_TOKEN}'")
+        logger.error(f"   Received: '{hub_verify_token}'")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Verification failed",
+                "expected_token": WEBHOOK_VERIFY_TOKEN,
+                "received_token": hub_verify_token
+            }
+        )
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Handle incoming WhatsApp webhooks with enhanced debugging and domain bot logic"""
+    """Handle incoming WhatsApp webhooks with domain bot logic"""
     logger.info("📨 INCOMING WEBHOOK")
     
     try:
@@ -322,7 +323,7 @@ async def handle_webhook(request: Request):
             logger.info("✅ JSON parsed successfully")
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON decode error: {e}")
-            logger.error(f"Raw body: {body.decode()[:1000]}...")  # First 1000 chars
+            logger.error(f"Raw body: {body.decode()[:1000]}...")
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
         
         # Log webhook data structure
@@ -341,7 +342,6 @@ async def handle_webhook(request: Request):
         if webhook_object == "whatsapp_business_account":
             logger.info("✅ WhatsApp Business Account webhook detected")
             
-            # Process entries
             entries = webhook_data.get("entry", [])
             logger.info(f"📋 Processing {len(entries)} entries")
             
@@ -359,8 +359,6 @@ async def handle_webhook(request: Request):
                     
                     if field == "messages":
                         value = change.get("value", {})
-                        
-                        # Handle messages
                         messages = value.get("messages", [])
                         logger.info(f"      📱 Messages: {len(messages)}")
                         
@@ -382,11 +380,11 @@ async def handle_webhook(request: Request):
                                 logger.info(f"            📝 Text: '{text_body}'")
                                 
                                 # BOT LOGIC: Check if it's a .ke domain query
-                                if text_body.endswith('.ke') or '.' not in text_body:  # Handle "example" -> "example.ke"
+                                if text_body.endswith('.ke') or '.' not in text_body:
                                     domain_query = text_body if text_body.endswith('.ke') else f"{text_body}.ke"
                                     logger.info(f"🤖 Domain check requested: {domain_query}")
                                     
-                                    # Step 1: Gracefully call domain service via HTTP (no security for now)
+                                    # Call domain service via HTTP
                                     domain_result = {"available": False, "error": "Unknown error"}
                                     try:
                                         async with aiohttp.ClientSession() as session:
@@ -414,7 +412,7 @@ async def handle_webhook(request: Request):
                                         logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
                                         domain_result = {"error": "Service unavailable"}
                                     
-                                    # Step 2: Format reply gracefully
+                                    # Format reply
                                     if domain_result.get("error"):
                                         reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Try again later!"
                                     elif domain_result.get("available", False):
@@ -427,43 +425,38 @@ async def handle_webhook(request: Request):
                                             reply_text += f"💡 Suggestions: {', '.join(suggestions[:3])}\n"
                                         reply_text += "Try another .ke domain!"
                                     
-                                    # Step 3: Send reply via WhatsApp API (with error handling)
+                                    # Send reply
                                     try:
                                         await send_whatsapp_reply(sender, reply_text, msg_id)
                                         logger.info(f"✅ Domain reply sent to {sender} for {domain_query}")
                                     except Exception as reply_error:
                                         logger.error(f"Failed to send domain reply: {str(reply_error)}", exc_info=True)
-                                        
-                            else:
-                                # Help message for non-domain texts
-                                help_text = (
-                                    "Hi! I'm a .ke domain availability bot. "
-                                    "Send me a domain like 'example.ke' (or just 'example') to check if it's available. "
-                                    "Powered by [Your Domain Service]."
-                                )
-                                try:
-                                    await send_whatsapp_reply(sender, help_text, msg_id)
-                                    logger.info(f"ℹ️ Help reply sent to {sender}")
-                                except Exception as help_error:
-                                    logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
+                                else:
+                                    help_text = (
+                                        "Hi! I'm a .ke domain availability bot. "
+                                        "Send me a domain like 'example.ke' (or just 'example') to check if it's available. "
+                                        "Powered by DigiKenya."
+                                    )
+                                    try:
+                                        await send_whatsapp_reply(sender, help_text, msg_id)
+                                        logger.info(f"ℹ️ Help reply sent to {sender}")
+                                    except Exception as help_error:
+                                        logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
                                 
                             elif msg_type == "image":
                                 image_info = message.get("image", {})
-                                logger.info(f"            🖼️  Image ID: {image_info.get('id')}")
-                                # Optional: Reply "Thanks for the image!" or ignore
+                                logger.info(f"            🖼️ Image ID: {image_info.get('id')}")
                             elif msg_type == "document":
                                 doc_info = message.get("document", {})
                                 logger.info(f"            📄 Document: {doc_info.get('filename')}")
-                                # Optional: Reply "Received your document!"
                         
                         # Handle status updates
                         statuses = value.get("statuses", [])
                         logger.info(f"      📊 Statuses: {len(statuses)}")
-                        
                         for status in statuses:
                             logger.info(f"         Status: {status.get('status')} for message {status.get('id')}")
                     else:
-                        logger.info(f"      ⏭️  Skipping field: {field}")
+                        logger.info(f"      ⏭️ Skipping field: {field}")
             
             logger.info("✅ Webhook processed successfully")
             return JSONResponse({"status": "success", "processed_entries": len(entries)})
@@ -471,21 +464,20 @@ async def handle_webhook(request: Request):
         else:
             logger.warning(f"❓ Unknown webhook object: {webhook_object}")
             return JSONResponse({
-                "status": "ignored", 
+                "status": "ignored",
                 "reason": f"Unknown webhook object: {webhook_object}",
                 "received_object": webhook_object
             })
             
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         logger.error(f"❌ UNEXPECTED ERROR processing webhook")
         logger.error(f"   Error type: {type(e).__name__}")
         logger.error(f"   Error message: {str(e)}")
         logger.exception("Full traceback:")
-        
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail={
                 "error": "Internal server error",
                 "error_type": type(e).__name__,
@@ -512,7 +504,6 @@ async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None)
         }
     }
     
-    # Optional: Reply to specific message (for threading)
     if replied_msg_id:
         payload["context"] = {"message_id": replied_msg_id}
     
@@ -549,7 +540,6 @@ async def health_check():
         }
     }
 
-# Enhanced error handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc: HTTPException):
     logger.warning(f"404 Not Found: {request.url}")
@@ -588,7 +578,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         }
     )
 
-# This is CRUCIAL for Railway
 if __name__ == "__main__":
     import uvicorn
     
@@ -603,5 +592,5 @@ if __name__ == "__main__":
         port=PORT,
         log_level="info",
         access_log=True,
-        reload=False  # Set to True for local dev
+        reload=False
     )
