@@ -9,15 +9,13 @@ import aiohttp
 from datetime import datetime
 from typing import Dict, Any, Optional
 from urllib.parse import quote, urlencode
-import re  # For simple state management helpers
+import re
 
 # Configure detailed logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
@@ -28,7 +26,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware (filter empty origins)
+# Add CORS middleware
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://digikenya.co.ke").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -38,22 +36,19 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# Supported .ke extensions (from your original code)
+# Supported .ke extensions
 SUPPORTED_EXTENSIONS = [
     ".co.ke", ".or.ke", ".ac.ke", ".go.ke", ".ne.ke", ".sc.ke",
     ".ke", ".me.ke", ".info.ke"
 ]
 
-# Simple in-memory state store (user phone -> state dict; resets on restart)
-# In production, replace with Redis/DB for persistence
+# In-memory user state store (replace with Redis/DB in production)
 user_states: Dict[str, Dict[str, Any]] = {}
 
-# Debug environment variables loading
+# Debug environment variables
 def debug_environment():
-    """Debug environment variables and system info"""
     logger.info("🔍 DEBUGGING ENVIRONMENT VARIABLES")
     logger.info("=" * 50)
-    
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Environment variables count: {len(os.environ)}")
@@ -82,18 +77,14 @@ def debug_environment():
             logger.info(f"  {key}: {masked_value}")
         else:
             logger.info(f"  {key}: {value}")
-    
     logger.info("=" * 50)
 
-# Get environment variables with better error handling
+# Get environment variable with error handling
 def get_env_var(var_name: str, default: str = None, required: bool = False) -> str:
-    """Get environment variable with detailed logging"""
     value = os.getenv(var_name, default)
-    
     if required and not value:
         logger.error(f"❌ CRITICAL: Required environment variable {var_name} is not set!")
         raise ValueError(f"Required environment variable {var_name} is missing")
-    
     if value:
         if var_name in ["APP_SECRET", "ACCESS_TOKEN"]:
             logger.info(f"✅ {var_name}: Set (length: {len(value)})")
@@ -101,12 +92,10 @@ def get_env_var(var_name: str, default: str = None, required: bool = False) -> s
             logger.info(f"✅ {var_name}: {value}")
     else:
         logger.warning(f"⚠️ {var_name}: Using default value '{default}'")
-    
     return value
 
-# Load environment variables (single debug call here)
+# Load environment variables
 debug_environment()
-
 try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
@@ -124,196 +113,193 @@ try:
     logger.info(f"   - API Version: {VERSION}")
     logger.info(f"   - Domain Check URL: {DOMAIN_CHECK_URL}")
     logger.info(f"   - Port: {PORT}")
-    
 except Exception as e:
     logger.error(f"❌ Failed to load configuration: {e}")
     raise
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup information"""
     logger.info("🎉 APPLICATION STARTING UP")
     logger.info(f"FastAPI app starting at {datetime.utcnow().isoformat()}")
 
 def get_user_state(user_phone: str) -> Dict[str, Any]:
-    """Get or initialize user state"""
     if user_phone not in user_states:
         user_states[user_phone] = {
-            "step": "greeting",  # greeting, searching, results, registering
+            "step": "greeting",
             "last_domain": None,
             "selected_extension": None
         }
     return user_states[user_phone]
 
 def update_user_state(user_phone: str, state: Dict[str, Any]):
-    """Update user state"""
     user_states[user_phone] = {**get_user_state(user_phone), **state}
 
 def is_greeting(text: str) -> bool:
-    """Check if message is a greeting"""
     greetings = ["hi", "hello", "hey", "hii", "helloo", "start", "begin"]
     return text.lower().strip() in greetings or len(text.strip()) < 3
 
-@app.get("/")
-async def root():
-    """Root endpoint with comprehensive system info"""
-    return {
-        "status": "running",
-        "message": "WhatsApp Webhook Server with .ke Domain Bot is running!",
-        "timestamp": datetime.utcnow().isoformat(),
-        "system_info": {
-            "python_version": sys.version,
-            "cwd": os.getcwd(),
-            "port": PORT,
-            "railway_env": os.getenv("RAILWAY_ENVIRONMENT", "not_set"),
-            "railway_project": os.getenv("RAILWAY_PROJECT_ID", "not_set")
-        },
-        "configuration": {
-            "webhook_verify_token_set": bool(WEBHOOK_VERIFY_TOKEN and WEBHOOK_VERIFY_TOKEN != "default_token"),
-            "app_secret_set": bool(APP_SECRET),
-            "access_token_set": bool(ACCESS_TOKEN),
-            "phone_number_id_set": bool(PHONE_NUMBER_ID),
-            "domain_check_url_set": bool(DOMAIN_CHECK_URL),
-            "using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token"
-        },
-        "endpoints": {
-            "health": "/health",
-            "webhook": "/webhook",
-            "debug": "/debug",
-            "test-webhook": "/test-webhook",
-            "docs": "/docs"
+async def send_interactive_reply(to: str, message: str, replied_msg_id: str = None, buttons: list = None):
+    """Send interactive button reply via WhatsApp API"""
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
+        return
+    
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+    
+    # Fix button format for WhatsApp
+    formatted_buttons = [
+        {
+            "type": "reply",
+            "reply": {
+                "id": btn["id"],
+                "title": btn["title"][:20]  # WhatsApp limits title to 20 chars
+            }
+        } for btn in (buttons or [])
+    ]
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": message[:4096]  # WhatsApp text limit
+            },
+            "action": {
+                "buttons": formatted_buttons
+            }
         }
     }
-
-@app.get("/debug")
-async def debug_info():
-    """Comprehensive debug information"""
-    logger.info("🔍 Debug info requested")
     
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": {
-            "python_version": sys.version,
-            "working_directory": os.getcwd(),
-            "total_env_vars": len(os.environ),
-            "railway_specific": {
-                var: os.getenv(var, "not_set")
-                for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID"]
-            }
-        },
-        "configuration": {
-            "webhook_verify_token": {
-                "is_set": bool(WEBHOOK_VERIFY_TOKEN),
-                "is_default": WEBHOOK_VERIFY_TOKEN == "default_token",
-                "length": len(WEBHOOK_VERIFY_TOKEN) if WEBHOOK_VERIFY_TOKEN else 0,
-                "preview": f"{WEBHOOK_VERIFY_TOKEN[:10]}..." if WEBHOOK_VERIFY_TOKEN and len(WEBHOOK_VERIFY_TOKEN) > 10 else WEBHOOK_VERIFY_TOKEN
-            },
-            "app_secret": {
-                "is_set": bool(APP_SECRET),
-                "length": len(APP_SECRET) if APP_SECRET else 0
-            },
-            "access_token": {
-                "is_set": bool(ACCESS_TOKEN),
-                "length": len(ACCESS_TOKEN) if ACCESS_TOKEN else 0
-            },
-            "phone_number_id": {
-                "is_set": bool(PHONE_NUMBER_ID),
-                "value": PHONE_NUMBER_ID or "NOT SET"
-            },
-            "version": VERSION,
-            "domain_check_url": DOMAIN_CHECK_URL,
-            "port": PORT
-        },
-        "warnings": [
-            warning for warning in [
-                "Using default WEBHOOK_VERIFY_TOKEN" if WEBHOOK_VERIFY_TOKEN == "default_token" else None,
-                "APP_SECRET not set" if not APP_SECRET else None,
-                "ACCESS_TOKEN not set" if not ACCESS_TOKEN else None,
-                "PHONE_NUMBER_ID not set" if not PHONE_NUMBER_ID else None,
-                "DOMAIN_CHECK_URL not set" if not DOMAIN_CHECK_URL else None,
-            ] if warning
-        ],
-        "railway_env_check": {
-            "all_env_vars_count": len(os.environ),
-            "railway_vars": {
-                var: os.getenv(var, "NOT_SET")
-                for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"]
-            }
-        },
-        "active_users": len(user_states)
-    }
-
-@app.get("/test-webhook")
-async def test_webhook_verification():
-    """Test webhook verification with detailed info"""
-    logger.info("🧪 Test webhook verification requested")
+    if replied_msg_id:
+        payload["context"] = {"message_id": replied_msg_id}
     
-    test_info = {
-        "webhook_verify_token": WEBHOOK_VERIFY_TOKEN,
-        "is_using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token",
-        "app_secret_set": bool(APP_SECRET),
-        "access_token_set": bool(ACCESS_TOKEN),
-        "phone_number_id_set": bool(PHONE_NUMBER_ID),
-        "domain_check_url": DOMAIN_CHECK_URL,
-        "test_verification_url": f"/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
-        "full_test_url": f"https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
-        "warnings": []
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
     }
     
-    if WEBHOOK_VERIFY_TOKEN == "default_token":
-        test_info["warnings"].append("⚠️ Using default verification token - change in production!")
-    if not APP_SECRET:
-        test_info["warnings"].append("⚠️ APP_SECRET not configured")
-    if not ACCESS_TOKEN:
-        test_info["warnings"].append("⚠️ ACCESS_TOKEN not configured")
-    if not PHONE_NUMBER_ID:
-        test_info["warnings"].append("⚠️ PHONE_NUMBER_ID not configured - replies disabled")
-    if not DOMAIN_CHECK_URL:
-        test_info["warnings"].append("⚠️ DOMAIN_CHECK_URL not configured")
-    
-    logger.info(f"Test info: {json.dumps(test_info, indent=2)}")
-    return test_info
+    logger.info(f"🔘 Sending interactive buttons: {json.dumps(formatted_buttons, indent=2)}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    reply_id = result.get('messages', [{}])[0].get('id')
+                    logger.info(f"✅ Interactive reply sent to {to}: ID {reply_id}")
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"❌ Failed to send interactive reply to {to}: {resp.status} - {error_text}")
+                    raise Exception(f"WhatsApp API error: {error_text}")
+    except Exception as e:
+        logger.error(f"❌ Exception sending interactive reply to {to}: {str(e)}", exc_info=True)
 
-@app.get("/webhook")
-async def verify_webhook(
-    hub_mode: str = Query(None, alias="hub.mode"),
-    hub_verify_token: str = Query(None, alias="hub.verify_token"),
-    hub_challenge: str = Query(None, alias="hub.challenge")
-):
-    """Webhook verification for WhatsApp with detailed debugging"""
-    logger.info("🔐 WEBHOOK VERIFICATION REQUEST")
-    logger.info(f"   Hub Mode: '{hub_mode}'")
-    logger.info(f"   Hub Verify Token: '{hub_verify_token}'")
-    logger.info(f"   Hub Challenge: '{hub_challenge}'")
-    logger.info(f"   Expected Token: '{WEBHOOK_VERIFY_TOKEN}'")
-    logger.info(f"   Token Match: {hub_verify_token == WEBHOOK_VERIFY_TOKEN}")
+async def send_template_reply(to: str, template_name: str, replied_msg_id: str = None):
+    """Send a predefined WhatsApp message template"""
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        logger.error("❌ Cannot send template - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
+        return
     
-    if not hub_mode:
-        logger.error("❌ hub.mode parameter missing")
-        raise HTTPException(status_code=400, detail="hub.mode parameter is required")
-    if not hub_verify_token:
-        logger.error("❌ hub.verify_token parameter missing")
-        raise HTTPException(status_code=400, detail="hub.verify_token parameter is required")
-    if not hub_challenge:
-        logger.error("❌ hub.challenge parameter missing")
-        raise HTTPException(status_code=400, detail="hub.challenge parameter is required")
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
     
-    if hub_mode == "subscribe" and hub_verify_token == WEBHOOK_VERIFY_TOKEN:
-        logger.info("✅ Webhook verified successfully!")
-        logger.info(f"   Returning challenge: '{hub_challenge}'")
-        return PlainTextResponse(hub_challenge)
-    else:
-        logger.error(f"❌ Webhook verification failed - {'Invalid token' if hub_mode == 'subscribe' else 'Invalid hub.mode'}")
-        logger.error(f"   Expected: '{WEBHOOK_VERIFY_TOKEN}'")
-        logger.error(f"   Received: '{hub_verify_token}'")
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "Verification failed",
-                "expected_token": WEBHOOK_VERIFY_TOKEN,
-                "received_token": hub_verify_token
-            }
-        )
+    # Template: Must be created in Meta Business Manager first
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": "en"},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": ", ".join(SUPPORTED_EXTENSIONS)}  # Pass extensions
+                    ]
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": 0,
+                    "parameters": [{"type": "payload", "payload": "search_domains"}]
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": 1,
+                    "parameters": [{"type": "payload", "payload": "visit_website"}]
+                }
+            ]
+        }
+    }
+    
+    if replied_msg_id:
+        payload["context"] = {"message_id": replied_msg_id}
+    
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    reply_id = result.get('messages', [{}])[0].get('id')
+                    logger.info(f"✅ Template reply sent to {to}: ID {reply_id}")
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"❌ Failed to send template reply to {to}: {resp.status} - {error_text}")
+                    if "template not found" in error_text.lower():
+                        logger.error("⚠️ Template not configured in Meta Business Manager")
+    except Exception as e:
+        logger.error(f"❌ Exception sending template reply to {to}: {str(e)}", exc_info=True)
+
+async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
+    """Send a text reply via WhatsApp Cloud API"""
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
+        return
+    
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": message[:4096]
+        }
+    }
+    
+    if replied_msg_id:
+        payload["context"] = {"message_id": replied_msg_id}
+    
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    reply_id = result.get('messages', [{}])[0].get('id')
+                    logger.info(f"✅ WhatsApp reply sent to {to}: ID {reply_id}")
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"❌ Failed to send WhatsApp reply to {to}: {resp.status} - {error_text}")
+                    if "unauthorized" in error_text.lower():
+                        logger.error("🔑 ACCESS_TOKEN may be invalid/expired - regenerate in Meta Dashboard")
+    except Exception as e:
+        logger.error(f"❌ Exception sending WhatsApp reply to {to}: {str(e)}", exc_info=True)
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
@@ -420,7 +406,7 @@ async def handle_webhook(request: Request):
                                 state = get_user_state(sender)
                                 logger.info(f"            🗂️ User state: {state}")
                                 
-                                # Greeting/First message or menu request
+                                # Greeting or menu request
                                 if is_greeting(text_body) or text_body == "menu":
                                     update_user_state(sender, {"step": "greeting"})
                                     extensions_list = "\n".join([f"• {ext}" for ext in SUPPORTED_EXTENSIONS])
@@ -430,7 +416,7 @@ async def handle_webhook(request: Request):
                                         f"{extensions_list}\n\n"
                                         f"What would you like to do?"
                                     )
-                                    # Send with buttons
+                                    # Send interactive message with buttons
                                     await send_interactive_reply(sender, reply_text, msg_id, [
                                         {"id": "search_domains", "title": "🔍 Search Domains"},
                                         {"id": "visit_website", "title": "🌐 Visit Website"}
@@ -439,7 +425,6 @@ async def handle_webhook(request: Request):
                                 
                                 # Handle search step
                                 if state.get("step") == "searching":
-                                    # Extract domain from text (e.g., "example" or "example.ke")
                                     domain_match = re.match(r'^([a-z0-9-]+\.?)(ke|co\.ke|or\.ke|ac\.ke|go\.ke|ne\.ke|sc\.ke|me\.ke|info\.ke)?$', text_body)
                                     if domain_match:
                                         domain_query = domain_match.group(1)
@@ -482,6 +467,7 @@ async def handle_webhook(request: Request):
                                         # Format results with button for registration
                                         if domain_result.get("error"):
                                             reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Reply 'menu' to start over."
+                                            await send_whatsapp_reply(sender, reply_text, msg_id)
                                         elif domain_result.get("available", False):
                                             price = domain_result.get("price", domain_result.get("pricing", {}).get("first_year", "N/A"))
                                             reply_text = f"✅ {domain_query} is AVAILABLE!\n💰 First year: {price}\n\nReady to register?"
@@ -497,8 +483,7 @@ async def handle_webhook(request: Request):
                                                 if sug_domains:
                                                     reply_text += f"💡 Suggestions: {', '.join(sug_domains)}\n"
                                             reply_text += "Pick one to check or reply 'menu'."
-                                            # Add buttons for top suggestions
-                                            buttons = [{"id": f"register_{s.get('domain', '')}", "title": s.get("domain", "")[:20] + "..." if s.get("available") else "Taken"} for s in suggestions[:3] if s.get("available")]
+                                            buttons = [{"id": f"register_{s.get('domain', '')}", "title": s.get("domain", "")[:20] if s.get("available") else "Taken"} for s in suggestions[:3] if s.get("available")]
                                             if buttons:
                                                 await send_interactive_reply(sender, reply_text, msg_id, buttons)
                                             else:
@@ -561,96 +546,8 @@ async def handle_webhook(request: Request):
             }
         )
 
-async def send_interactive_reply(to: str, message: str, replied_msg_id: str = None, buttons: list = None):
-    """Send interactive button reply via WhatsApp API"""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
-        return
-    
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": message
-            },
-            "action": {
-                "buttons": buttons or []
-            }
-        }
-    }
-    
-    if replied_msg_id:
-        payload["context"] = {"message_id": replied_msg_id}
-    
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    reply_id = result.get('messages', [{}])[0].get('id')
-                    logger.info(f"✅ Interactive reply sent to {to}: ID {reply_id}")
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"❌ Failed to send interactive reply to {to}: {resp.status} - {error_text}")
-    except Exception as e:
-        logger.error(f"❌ Exception sending interactive reply to {to}: {str(e)}", exc_info=True)
-
-async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
-    """Send a text reply via WhatsApp Cloud API with graceful error handling"""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
-        return
-    
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "text",
-        "text": {
-            "preview_url": False,
-            "body": message
-        }
-    }
-    
-    if replied_msg_id:
-        payload["context"] = {"message_id": replied_msg_id}
-    
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    reply_id = result.get('messages', [{}])[0].get('id')
-                    logger.info(f"✅ WhatsApp reply sent to {to}: ID {reply_id}")
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"❌ Failed to send WhatsApp reply to {to}: {resp.status} - {error_text}")
-                    if "unauthorized" in error_text.lower():
-                        logger.error("🔑 ACCESS_TOKEN may be invalid/expired - regenerate in Meta Dashboard")
-    except Exception as e:
-        logger.error(f"❌ Exception sending WhatsApp reply to {to}: {str(e)}", exc_info=True)
-
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
