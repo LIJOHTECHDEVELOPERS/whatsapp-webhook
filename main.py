@@ -41,15 +41,13 @@ def debug_environment():
     logger.info("🔍 DEBUGGING ENVIRONMENT VARIABLES")
     logger.info("=" * 50)
     
-    # System info
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Environment variables count: {len(os.environ)}")
     
-    # Check specific variables
     env_vars = [
         "WEBHOOK_VERIFY_TOKEN",
-        "APP_SECRET", 
+        "APP_SECRET",
         "ACCESS_TOKEN",
         "PHONE_NUMBER_ID",
         "VERSION",
@@ -65,7 +63,6 @@ def debug_environment():
     for var in env_vars:
         value = os.getenv(var)
         if value:
-            # Mask sensitive data
             if var in ["APP_SECRET", "ACCESS_TOKEN"]:
                 masked_value = f"{value[:10]}{'*' * (len(value) - 10)}" if len(value) > 10 else "*" * len(value)
                 logger.info(f"✅ {var}: {masked_value} (length: {len(value)})")
@@ -74,7 +71,6 @@ def debug_environment():
         else:
             logger.warning(f"❌ {var}: NOT SET")
     
-    # Show all environment variables (for debugging)
     logger.info("\n🌍 ALL ENVIRONMENT VARIABLES:")
     for key, value in sorted(os.environ.items()):
         if any(sensitive in key.upper() for sensitive in ['TOKEN', 'SECRET', 'KEY', 'PASSWORD']):
@@ -103,7 +99,7 @@ def get_env_var(var_name: str, default: str = None, required: bool = False) -> s
         else:
             logger.info(f"✅ {var_name}: {value}")
     else:
-        logger.warning(f"⚠️  {var_name}: Using default value '{default}'")
+        logger.warning(f"⚠️ {var_name}: Using default value '{default}'")
     
     return value
 
@@ -112,16 +108,16 @@ try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
     ACCESS_TOKEN = get_env_var("ACCESS_TOKEN", "")
-    PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", required=True)
+    PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", None, required=False)  # Optional to avoid crash
     VERSION = get_env_var("VERSION", "v19.0")
-    DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "http://api.digikenya.co.ke/api/v1/domains/availability/check")
+    DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "https://api.digikenya.co.ke/api/v1/domains/availability/check")
     PORT = int(get_env_var("PORT", "8000"))
     
     logger.info(f"🚀 Configuration loaded successfully")
     logger.info(f"   - Verify Token: {WEBHOOK_VERIFY_TOKEN[:10]}...")
     logger.info(f"   - App Secret: {'SET' if APP_SECRET else 'NOT SET'}")
     logger.info(f"   - Access Token: {'SET' if ACCESS_TOKEN else 'NOT SET'}")
-    logger.info(f"   - Phone Number ID: {PHONE_NUMBER_ID}")
+    logger.info(f"   - Phone Number ID: {PHONE_NUMBER_ID or 'NOT SET'}")
     logger.info(f"   - API Version: {VERSION}")
     logger.info(f"   - Domain Check URL: {DOMAIN_CHECK_URL}")
     logger.info(f"   - Port: {PORT}")
@@ -180,7 +176,7 @@ async def debug_info():
             "working_directory": os.getcwd(),
             "total_env_vars": len(os.environ),
             "railway_specific": {
-                var: os.getenv(var, "not_set") 
+                var: os.getenv(var, "not_set")
                 for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID"]
             }
         },
@@ -201,7 +197,7 @@ async def debug_info():
             },
             "phone_number_id": {
                 "is_set": bool(PHONE_NUMBER_ID),
-                "value": PHONE_NUMBER_ID
+                "value": PHONE_NUMBER_ID or "NOT SET"
             },
             "version": VERSION,
             "domain_check_url": DOMAIN_CHECK_URL,
@@ -219,7 +215,7 @@ async def debug_info():
         "railway_env_check": {
             "all_env_vars_count": len(os.environ),
             "railway_vars": {
-                var: os.getenv(var, "NOT_SET") 
+                var: os.getenv(var, "NOT_SET")
                 for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"]
             }
         }
@@ -242,7 +238,6 @@ async def test_webhook_verification():
         "warnings": []
     }
     
-    # Add warnings
     if WEBHOOK_VERIFY_TOKEN == "default_token":
         test_info["warnings"].append("⚠️ Using default verification token - change in production!")
     if not APP_SECRET:
@@ -250,7 +245,7 @@ async def test_webhook_verification():
     if not ACCESS_TOKEN:
         test_info["warnings"].append("⚠️ ACCESS_TOKEN not configured")
     if not PHONE_NUMBER_ID:
-        test_info["warnings"].append("⚠️ PHONE_NUMBER_ID not configured")
+        test_info["warnings"].append("⚠️ PHONE_NUMBER_ID not configured - replies disabled")
     if not DOMAIN_CHECK_URL:
         test_info["warnings"].append("⚠️ DOMAIN_CHECK_URL not configured")
     
@@ -304,12 +299,10 @@ async def handle_webhook(request: Request):
     logger.info("📨 INCOMING WEBHOOK")
     
     try:
-        # Log request headers
         logger.info("📋 Request Headers:")
         for header_name, header_value in request.headers.items():
             logger.info(f"   {header_name}: {header_value}")
         
-        # Get raw body
         body = await request.body()
         logger.info(f"📦 Raw body length: {len(body)} bytes")
         
@@ -317,7 +310,6 @@ async def handle_webhook(request: Request):
             logger.error("❌ Empty request body")
             raise HTTPException(status_code=400, detail="Empty request body")
         
-        # Parse JSON
         try:
             webhook_data = json.loads(body.decode())
             logger.info("✅ JSON parsed successfully")
@@ -326,16 +318,13 @@ async def handle_webhook(request: Request):
             logger.error(f"Raw body: {body.decode()[:1000]}...")
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
         
-        # Log webhook data structure
         logger.info("📨 Webhook Data Structure:")
         logger.info(json.dumps(webhook_data, indent=2))
         
-        # Validate webhook data
         if not isinstance(webhook_data, dict):
             logger.error("❌ Webhook data is not a dictionary")
             raise HTTPException(status_code=400, detail="Webhook data must be a JSON object")
         
-        # Process webhook
         webhook_object = webhook_data.get("object")
         logger.info(f"🎯 Webhook object: {webhook_object}")
         
@@ -379,12 +368,10 @@ async def handle_webhook(request: Request):
                                 text_body = text_content.get("body", "").strip().lower()
                                 logger.info(f"            📝 Text: '{text_body}'")
                                 
-                                # BOT LOGIC: Check if it's a .ke domain query
                                 if text_body.endswith('.ke') or '.' not in text_body:
                                     domain_query = text_body if text_body.endswith('.ke') else f"{text_body}.ke"
                                     logger.info(f"🤖 Domain check requested: {domain_query}")
                                     
-                                    # Call domain service via HTTP
                                     domain_result = {"available": False, "error": "Unknown error"}
                                     try:
                                         async with aiohttp.ClientSession() as session:
@@ -412,7 +399,6 @@ async def handle_webhook(request: Request):
                                         logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
                                         domain_result = {"error": "Service unavailable"}
                                     
-                                    # Format reply
                                     if domain_result.get("error"):
                                         reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Try again later!"
                                     elif domain_result.get("available", False):
@@ -425,23 +411,28 @@ async def handle_webhook(request: Request):
                                             reply_text += f"💡 Suggestions: {', '.join(suggestions[:3])}\n"
                                         reply_text += "Try another .ke domain!"
                                     
-                                    # Send reply
-                                    try:
-                                        await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        logger.info(f"✅ Domain reply sent to {sender} for {domain_query}")
-                                    except Exception as reply_error:
-                                        logger.error(f"Failed to send domain reply: {str(reply_error)}", exc_info=True)
+                                    if PHONE_NUMBER_ID and ACCESS_TOKEN:
+                                        try:
+                                            await send_whatsapp_reply(sender, reply_text, msg_id)
+                                            logger.info(f"✅ Domain reply sent to {sender} for {domain_query}")
+                                        except Exception as reply_error:
+                                            logger.error(f"Failed to send domain reply: {str(reply_error)}", exc_info=True)
+                                    else:
+                                        logger.warning(f"⚠️ Skipping reply to {sender} - PHONE_NUMBER_ID or ACCESS_TOKEN missing")
                                 else:
                                     help_text = (
                                         "Hi! I'm a .ke domain availability bot. "
                                         "Send me a domain like 'example.ke' (or just 'example') to check if it's available. "
                                         "Powered by DigiKenya."
                                     )
-                                    try:
-                                        await send_whatsapp_reply(sender, help_text, msg_id)
-                                        logger.info(f"ℹ️ Help reply sent to {sender}")
-                                    except Exception as help_error:
-                                        logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
+                                    if PHONE_NUMBER_ID and ACCESS_TOKEN:
+                                        try:
+                                            await send_whatsapp_reply(sender, help_text, msg_id)
+                                            logger.info(f"ℹ️ Help reply sent to {sender}")
+                                        except Exception as help_error:
+                                            logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
+                                    else:
+                                        logger.warning(f"⚠️ Skipping help reply to {sender} - PHONE_NUMBER_ID or ACCESS_TOKEN missing")
                                 
                             elif msg_type == "image":
                                 image_info = message.get("image", {})
@@ -450,7 +441,6 @@ async def handle_webhook(request: Request):
                                 doc_info = message.get("document", {})
                                 logger.info(f"            📄 Document: {doc_info.get('filename')}")
                         
-                        # Handle status updates
                         statuses = value.get("statuses", [])
                         logger.info(f"      📊 Statuses: {len(statuses)}")
                         for status in statuses:
@@ -487,8 +477,8 @@ async def handle_webhook(request: Request):
 
 async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
     """Send a reply message via WhatsApp Cloud API with graceful error handling"""
-    if not ACCESS_TOKEN:
-        logger.error("❌ ACCESS_TOKEN not set - cannot send reply")
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
         return
     
     url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
