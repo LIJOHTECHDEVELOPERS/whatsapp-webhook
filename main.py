@@ -39,15 +39,15 @@ app.add_middleware(
 
 # Enhanced .ke extensions with descriptions
 DOMAIN_EXTENSIONS = {
-    ".ke": "🇰🇪 General Kenya domains",
-    ".co.ke": "🏢 Commercial organizations",
-    ".or.ke": "🏛️ Non-profit organizations", 
-    ".ac.ke": "🎓 Academic institutions",
-    ".go.ke": "🏛️ Government entities",
-    ".ne.ke": "🌐 Network providers",
-    ".sc.ke": "🔬 Scientific organizations",
-    ".me.ke": "👤 Personal domains",
-    ".info.ke": "ℹ️ Information sites"
+    ".ke": " General Kenya domains",
+    ".co.ke": " Commercial organizations",
+    ".or.ke": " Non-profit organizations", 
+    ".ac.ke": " Academic institutions",
+    ".go.ke": " Government entities",
+    ".ne.ke": " Network providers",
+    ".sc.ke": " Scientific organizations",
+    ".me.ke": " Personal domains",
+    ".info.ke": " Information sites"
 }
 
 # Enhanced user state management
@@ -65,15 +65,14 @@ def get_env_var(var_name: str, default: str = None, required: bool = False) -> s
     """Get environment variable with proper logging"""
     value = os.getenv(var_name, default)
     if required and not value:
-        logger.error(f"❌ CRITICAL: Required environment variable {var_name} is not set!")
+        logger.error(f" CRITICAL: Required environment variable {var_name} is not set!")
         raise ValueError(f"Required environment variable {var_name} is missing")
-    
     if value and var_name in ["APP_SECRET", "ACCESS_TOKEN"]:
-        logger.info(f"✅ {var_name}: Set (length: {len(value)})")
+        logger.info(f" {var_name}: Set (length: {len(value)})")
     elif value:
-        logger.info(f"✅ {var_name}: {value}")
+        logger.info(f" {var_name}: {value}")
     else:
-        logger.warning(f"⚠️ {var_name}: Using default value '{default}'")
+        logger.warning(f" {var_name}: Using default value '{default}'")
     return value
 
 # Load configuration
@@ -85,24 +84,22 @@ try:
     VERSION = get_env_var("VERSION", "v19.0")
     DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "https://api.digikenya.co.ke/api/v1/domains/availability/check")
     PORT = int(get_env_var("PORT", "8080"))
-    
-    logger.info("🚀 Smart Domain Bot Configuration Loaded Successfully")
+    logger.info(" Smart Domain Bot Configuration Loaded Successfully")
 except Exception as e:
-    logger.error(f"❌ Configuration error: {e}")
+    logger.error(f" Configuration error: {e}")
     raise
 
 class SmartDomainBot:
     """Enhanced domain bot with intelligent conversation flow"""
-    
     def __init__(self):
         self.conversation_states = {
-            "greeting": "👋 Welcome state",
-            "searching": "🔍 Domain search mode",
-            "extension_select": "📋 Extension selection",
-            "results": "📊 Results display",
-            "bulk_search": "🔄 Multiple domain check"
+            "greeting": " Welcome state",
+            "searching": " Domain search mode",
+            "extension_select": " Extension selection",
+            "results": " Results display",
+            "bulk_search": " Multiple domain check"
         }
-    
+
     def get_user_state(self, user_phone: str) -> Dict[str, Any]:
         """Get or create user state with defaults"""
         if user_phone not in user_states:
@@ -114,15 +111,15 @@ class SmartDomainBot:
                 "last_activity": datetime.utcnow().isoformat()
             }
         return user_states[user_phone]
-    
+
     def update_user_state(self, user_phone: str, updates: Dict[str, Any]):
         """Update user state with timestamp"""
         state = self.get_user_state(user_phone)
         state.update(updates)
         state["last_activity"] = datetime.utcnow().isoformat()
         user_states[user_phone] = state
-        logger.info(f"👤 Updated state for {user_phone}: {updates}")
-    
+        logger.info(f" Updated state for {user_phone}: {updates}")
+
     def parse_domain_input(self, text: str) -> Dict[str, Any]:
         """Intelligently parse user domain input"""
         text = text.strip().lower()
@@ -162,7 +159,7 @@ class SmartDomainBot:
             }
         
         return {"type": "invalid", "error": "Invalid domain format"}
-    
+
     def is_greeting(self, text: str) -> bool:
         """Enhanced greeting detection"""
         greetings = [
@@ -236,48 +233,48 @@ class SmartDomainBot:
         errors = results.get("errors", [])
         
         if not available and not unavailable:
-            return f"❌ Sorry, couldn't check domains for '{base_domain}' right now. Please try again later."
+            return f" Sorry, couldn't check domains for '{base_domain}' right now. Please try again later."
         
         message_parts = []
         
         # Available domains (priority)
         if available:
-            message_parts.append("✅ *AVAILABLE DOMAINS*")
+            message_parts.append(" *AVAILABLE DOMAINS*")
             for domain_info in available[:5]:  # Limit to top 5
                 domain = domain_info.get("domain", "")
                 price = domain_info.get("price", domain_info.get("pricing", {}).get("first_year", "Contact us"))
                 extension = "." + domain.split(".", 1)[1] if "." in domain else ""
                 ext_desc = DOMAIN_EXTENSIONS.get(extension, "Domain")
-                message_parts.append(f"🟢 *{domain}*\n   {ext_desc}\n   💰 {price}")
+                message_parts.append(f" *{domain}*\n   {ext_desc}\n    {price}")
         
         # Unavailable domains summary
         if unavailable:
             unavailable_count = len(unavailable)
-            message_parts.append(f"\n❌ *{unavailable_count} domains unavailable*")
+            message_parts.append(f"\n *{unavailable_count} domains unavailable*")
             if unavailable_count <= 3:
                 for domain_info in unavailable:
                     domain = domain_info.get("domain", "")
-                    message_parts.append(f"🔴 {domain}")
+                    message_parts.append(f" {domain}")
         
         # Errors summary
         if errors:
             error_count = len(errors)
-            message_parts.append(f"\n⚠️ {error_count} domains couldn't be checked")
+            message_parts.append(f"\n {error_count} domains couldn't be checked")
         
         result_message = "\n".join(message_parts)
         
         # Add call-to-action
         if available:
-            result_message += f"\n\n🎯 *Ready to register?*\nChoose a domain above or visit: https://digikenya.co.ke"
+            result_message += f"\n\n *Ready to register?*\nChoose a domain above or visit: https://digikenya.co.ke"
         else:
-            result_message += f"\n\n💡 Try different variations of '{base_domain}' or visit our website for more options."
+            result_message += f"\n\n Try different variations of '{base_domain}' or visit our website for more options."
         
         return result_message
 
     async def send_interactive_message(self, to: str, message: str, buttons: List[Dict] = None, replied_msg_id: str = None):
         """Send enhanced interactive message with better formatting"""
         if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-            logger.error("❌ Cannot send message - credentials missing")
+            logger.error(" Cannot send message - credentials missing")
             return False
         
         url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
@@ -328,14 +325,14 @@ class SmartDomainBot:
                     if resp.status == 200:
                         result = await resp.json()
                         msg_id = result.get('messages', [{}])[0].get('id')
-                        logger.info(f"✅ Message sent to {to}: ID {msg_id}")
+                        logger.info(f" Message sent to {to}: ID {msg_id}")
                         return True
                     else:
                         error_text = await resp.text()
-                        logger.error(f"❌ Failed to send message to {to}: {resp.status} - {error_text}")
+                        logger.error(f" Failed to send message to {to}: {resp.status} - {error_text}")
                         return False
         except Exception as e:
-            logger.error(f"❌ Exception sending message to {to}: {str(e)}")
+            logger.error(f" Exception sending message to {to}: {str(e)}")
             return False
 
     async def handle_user_message(self, sender: str, message_text: str, message_id: str):
@@ -344,7 +341,7 @@ class SmartDomainBot:
         state = self.get_user_state(sender)
         current_step = state.get("step", "greeting")
         
-        logger.info(f"🧠 Processing message from {sender}: '{text}' (Step: {current_step})")
+        logger.info(f" Processing message from {sender}: '{text}' (Step: {current_step})")
         
         # Handle greetings and menu requests
         if self.is_greeting(text):
@@ -383,19 +380,19 @@ class SmartDomainBot:
         extensions_list = "\n".join([f"• *{ext}* - {desc}" for ext, desc in list(DOMAIN_EXTENSIONS.items())[:6]])
         
         welcome_text = (
-            "🚀 *Welcome to DigiKenya Smart Domain Bot!*\n\n"
+            " *Welcome to DigiKenya Smart Domain Bot!*\n\n"
             "I'll help you find the perfect .ke domain quickly and easily.\n\n"
-            "🎯 *Popular Extensions:*\n"
+            " *Popular Extensions:*\n"
             f"{extensions_list}\n"
             "...and more!\n\n"
-            "💬 *Just type your desired domain name*\n"
+            " *Just type your desired domain name*\n"
             "Examples: 'mycompany', 'john.co.ke', 'myblog'"
         )
         
         buttons = [
-            {"id": "search_domains", "title": "🔍 Search Now"},
-            {"id": "view_extensions", "title": "📋 All Extensions"},
-            {"id": "visit_website", "title": "🌐 Visit Website"}
+            {"id": "search_domains", "title": " Search Now"},
+            {"id": "view_extensions", "title": " All Extensions"},
+            {"id": "visit_website", "title": " Visit Website"}
         ]
         
         await self.send_interactive_message(to, welcome_text, buttons, replied_msg_id)
@@ -405,12 +402,12 @@ class SmartDomainBot:
         self.update_user_state(to, {"step": "searching"})
         
         prompt_text = (
-            "🔍 *What domain would you like to check?*\n\n"
-            "💡 *You can search:*\n"
+            " *What domain would you like to check?*\n\n"
+            " *You can search:*\n"
             "• Just the name: `mycompany`\n"
             "• With extension: `mycompany.co.ke`\n"
             "• Partial: `mycompany.co`\n\n"
-            "I'll check all available .ke extensions for you! ✨"
+            "I'll check all available .ke extensions for you! "
         )
         
         await self.send_interactive_message(to, prompt_text, replied_msg_id=replied_msg_id)
@@ -422,7 +419,7 @@ class SmartDomainBot:
         
         if parsed["type"] == "invalid":
             error_text = (
-                "❌ *Invalid domain format*\n\n"
+                " *Invalid domain format*\n\n"
                 "Please try:\n"
                 "• `mycompany` (I'll check all extensions)\n"
                 "• `mycompany.co.ke` (specific domain)\n"
@@ -443,7 +440,7 @@ class SmartDomainBot:
         
         # Send "searching" message
         search_count = len(domains_to_check)
-        searching_text = f"🔍 Searching {search_count} domain{'s' if search_count > 1 else ''} for '*{base_domain}*'...\n\nThis may take a moment ⏳"
+        searching_text = f" Searching {search_count} domain{'s' if search_count > 1 else ''} for '*{base_domain}*'...\n\nThis may take a moment "
         await self.send_interactive_message(sender, searching_text, replied_msg_id=message_id)
         
         # Check domains
@@ -455,12 +452,12 @@ class SmartDomainBot:
         # Add interactive buttons based on results
         buttons = []
         if results.get("available"):
-            buttons.append({"id": "register_domain", "title": "🛒 Register Now"})
+            buttons.append({"id": "register_domain", "title": " Register Now"})
             
         if len(results.get("unavailable", [])) > 0 or results.get("errors"):
-            buttons.append({"id": "try_variations", "title": "💡 Try Variations"})
+            buttons.append({"id": "try_variations", "title": " Try Variations"})
             
-        buttons.append({"id": "new_search", "title": "🔍 New Search"})
+        buttons.append({"id": "new_search", "title": " New Search"})
         
         await self.send_interactive_message(sender, results_text, buttons)
         
@@ -473,46 +470,44 @@ class SmartDomainBot:
 
     async def handle_button_click(self, sender: str, button_id: str, message_id: str):
         """Handle interactive button clicks"""
-        logger.info(f"🔘 Button clicked by {sender}: {button_id}")
+        logger.info(f" Button clicked by {sender}: {button_id}")
         
         if button_id == "search_domains":
             await self.send_search_prompt(sender, message_id)
             
         elif button_id == "view_extensions":
-            extensions_text = "📋 *All Available .ke Extensions:*\n\n"
+            extensions_text = " *All Available .ke Extensions:*\n\n"
             extensions_text += "\n".join([f"• *{ext}* - {desc}" for ext, desc in DOMAIN_EXTENSIONS.items()])
-            extensions_text += "\n\n💬 Type your domain name to get started!"
+            extensions_text += "\n\n Type your domain name to get started!"
             await self.send_interactive_message(sender, extensions_text, replied_msg_id=message_id)
             
         elif button_id == "visit_website":
             website_text = (
-                "🌐 *Visit DigiKenya*\n\n"
+                " *Visit DigiKenya*\n\n"
                 "Explore all our services:\n"
-                "👉 https://digikenya.co.ke\n\n"
+                " https://digikenya.co.ke\n\n"
                 "• Domain Registration\n"
                 "• Web Hosting\n"
                 "• Website Design\n"
                 "• Digital Solutions\n\n"
-                "💬 Or continue searching domains here!"
+                " Or continue searching domains here!"
             )
-            buttons = [{"id": "new_search", "title": "🔍 Search Domains"}]
+            buttons = [{"id": "new_search", "title": " Search Domains"}]
             await self.send_interactive_message(sender, website_text, buttons, message_id)
             
         elif button_id == "register_domain":
-            state = self.get_user_state(sender)
-            last_results = state.get("last_results", {})
-            available = last_results.get("available", [])
-            
-            if available:
-                register_text = "🛒 *Ready to Register?*\n\nChoose from your available domains:\n\n"
-                for domain_info in available[:3]:
-                    domain = domain_info.get("domain", "")
-                    price = domain_info.get("price", "Contact us")
-                    register_url = f"https://digikenya.co.ke/register?domain={quote(domain)}"
-                    register_text += f"• *{domain}* ({price})\n  👉 {register_url}\n\n"
-                
-                register_text += "💬 Need help? Contact our support team!"
-                await self.send_interactive_message(sender, register_text, replied_msg_id=message_id)
+            register_text = (
+                " *Domain Registration Coming Soon!*\n\n"
+                "We're working on bringing you a seamless registration experience.\n"
+                "For now, you can register your .ke domain directly at:\n"
+                " https://digikenya.co.ke\n\n"
+                "Visit our website to secure your domain today!"
+            )
+            buttons = [
+                {"id": "new_search", "title": " Search Again"},
+                {"id": "visit_website", "title": " Visit Website"}
+            ]
+            await self.send_interactive_message(sender, register_text, buttons, replied_msg_id=message_id)
             
         elif button_id == "new_search":
             await self.send_search_prompt(sender, message_id)
@@ -522,11 +517,11 @@ class SmartDomainBot:
             current_domain = state.get("current_domain")
             if current_domain:
                 variation_text = (
-                    f"💡 *Try these variations of '{current_domain}':*\n\n"
+                    f" *Try these variations of '{current_domain}':*\n\n"
                     f"• {current_domain}ke, {current_domain}kenya\n"
                     f"• my{current_domain}, get{current_domain}\n"
                     f"• {current_domain}online, {current_domain}digital\n\n"
-                    "Just type any variation to search! ✨"
+                    "Just type any variation to search! "
                 )
                 await self.send_interactive_message(sender, variation_text, replied_msg_id=message_id)
 
@@ -540,28 +535,26 @@ async def verify_webhook(
     hub_challenge: str = Query(None, alias="hub.challenge")
 ):
     """Webhook verification endpoint"""
-    logger.info(f"🔐 Webhook verification request")
+    logger.info(f" Webhook verification request")
     logger.info(f"   Mode: {hub_mode}")
     logger.info(f"   Token: {hub_verify_token}")
     logger.info(f"   Challenge: {hub_challenge}")
-    
     if hub_mode == "subscribe" and hub_verify_token == WEBHOOK_VERIFY_TOKEN:
-        logger.info("✅ Webhook verified successfully")
+        logger.info(" Webhook verified successfully")
         return PlainTextResponse(content=hub_challenge, status_code=200)
     else:
-        logger.error("❌ Webhook verification failed")
+        logger.error(" Webhook verification failed")
         raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
     """Enhanced webhook handler with smart conversation flow"""
-    logger.info("📨 Incoming webhook")
-    
+    logger.info(" Incoming webhook")
     try:
         body = await request.body()
         webhook_data = json.loads(body.decode())
         
-        logger.info(f"📦 Webhook data: {json.dumps(webhook_data, indent=2)[:500]}...")
+        logger.info(f" Webhook data: {json.dumps(webhook_data, indent=2)[:500]}...")
         
         if webhook_data.get("object") == "whatsapp_business_account":
             entries = webhook_data.get("entry", [])
@@ -579,7 +572,7 @@ async def handle_webhook(request: Request):
                             msg_type = message.get("type")
                             msg_id = message.get("id")
                             
-                            logger.info(f"💬 Message from {sender} (type: {msg_type})")
+                            logger.info(f" Message from {sender} (type: {msg_type})")
                             
                             # Handle interactive button responses
                             if msg_type == "interactive":
@@ -598,10 +591,10 @@ async def handle_webhook(request: Request):
                             # Handle other message types
                             else:
                                 fallback_text = (
-                                    "👋 I can help you search for .ke domains!\n\n"
+                                    " I can help you search for .ke domains!\n\n"
                                     "Just type the domain name you want to check.\n"
                                     "Example: 'mycompany' or 'myblog.ke'\n\n"
-                                    "🚀 Plus explore our digital services:\n"
+                                    " Plus explore our digital services:\n"
                                     "• DNS hosting • SSL certificates • AI development"
                                 )
                                 await smart_bot.send_interactive_message(sender, fallback_text, replied_msg_id=msg_id)
@@ -609,11 +602,11 @@ async def handle_webhook(request: Request):
             return JSONResponse({"status": "success", "message": "Processed successfully"})
         
         else:
-            logger.warning(f"❓ Unknown webhook object: {webhook_data.get('object')}")
+            logger.warning(f" Unknown webhook object: {webhook_data.get('object')}")
             return JSONResponse({"status": "ignored", "reason": "Unknown webhook object"})
             
     except Exception as e:
-        logger.error(f"❌ Webhook processing error: {str(e)}", exc_info=True)
+        logger.error(f" Webhook processing error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @app.get("/health")
@@ -639,7 +632,6 @@ async def health_check():
 async def get_stats():
     """Get bot usage statistics"""
     total_searches = sum(len(state.get("search_history", [])) for state in user_states.values())
-    
     return {
         "active_users": len(user_states),
         "total_searches": total_searches,
@@ -650,15 +642,14 @@ async def get_stats():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🚀 Smart WhatsApp Domain Bot Starting Up")
+    logger.info(" Smart WhatsApp Domain Bot Starting Up")
     logger.info(f"   Supported Extensions: {len(DOMAIN_EXTENSIONS)}")
     logger.info(f"   API Endpoint: {DOMAIN_CHECK_URL}")
-    logger.info("✅ Bot Ready!")
+    logger.info(" Bot Ready!")
 
 if __name__ == "__main__":
     import uvicorn
-    
-    logger.info("🌟 Starting Smart Domain Bot Server")
+    logger.info(" Starting Smart Domain Bot Server")
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
