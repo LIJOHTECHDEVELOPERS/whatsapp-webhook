@@ -4,6 +4,7 @@ import json
 import os
 import logging
 import sys
+import aiohttp  # For async HTTP calls
 from datetime import datetime
 from typing import Dict, Any
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title="WhatsApp Webhook",
-    description="WhatsApp Business API Webhook",
+    description="WhatsApp Business API Webhook with .ke Domain Bot",
     version="1.0.0"
 )
 
@@ -40,6 +41,9 @@ def debug_environment():
         "WEBHOOK_VERIFY_TOKEN",
         "APP_SECRET", 
         "ACCESS_TOKEN",
+        "PHONE_NUMBER_ID",
+        "VERSION",
+        "DOMAIN_CHECK_URL",
         "PORT",
         "RAILWAY_ENVIRONMENT",
         "RAILWAY_PROJECT_ID",
@@ -97,12 +101,18 @@ try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
     ACCESS_TOKEN = get_env_var("ACCESS_TOKEN", "")
+    PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", required=True)  # Required for replies
+    VERSION = get_env_var("VERSION", "v19.0")  # WhatsApp API version
+    DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "http://api.digikenya.co.ke/api/v1/domains/availability/check")  # Adjust to your domain app
     PORT = int(get_env_var("PORT", "8000"))
     
     logger.info(f"🚀 Configuration loaded successfully")
     logger.info(f"   - Verify Token: {WEBHOOK_VERIFY_TOKEN[:10]}...")
     logger.info(f"   - App Secret: {'SET' if APP_SECRET else 'NOT SET'}")
     logger.info(f"   - Access Token: {'SET' if ACCESS_TOKEN else 'NOT SET'}")
+    logger.info(f"   - Phone Number ID: {PHONE_NUMBER_ID}")
+    logger.info(f"   - API Version: {VERSION}")
+    logger.info(f"   - Domain Check URL: {DOMAIN_CHECK_URL}")
     logger.info(f"   - Port: {PORT}")
     
 except Exception as e:
@@ -121,7 +131,7 @@ async def root():
     """Root endpoint with comprehensive system info"""
     return {
         "status": "running",
-        "message": "WhatsApp Webhook Server is running!",
+        "message": "WhatsApp Webhook Server with .ke Domain Bot is running!",
         "timestamp": datetime.utcnow().isoformat(),
         "system_info": {
             "python_version": sys.version,
@@ -134,6 +144,8 @@ async def root():
             "webhook_verify_token_set": bool(WEBHOOK_VERIFY_TOKEN and WEBHOOK_VERIFY_TOKEN != "default_token"),
             "app_secret_set": bool(APP_SECRET),
             "access_token_set": bool(ACCESS_TOKEN),
+            "phone_number_id_set": bool(PHONE_NUMBER_ID),
+            "domain_check_url_set": bool(DOMAIN_CHECK_URL),
             "using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token"
         },
         "endpoints": {
@@ -176,16 +188,21 @@ async def debug_info():
                 "is_set": bool(ACCESS_TOKEN),
                 "length": len(ACCESS_TOKEN) if ACCESS_TOKEN else 0
             },
+            "phone_number_id": {
+                "is_set": bool(PHONE_NUMBER_ID),
+                "value": PHONE_NUMBER_ID
+            },
+            "version": VERSION,
+            "domain_check_url": DOMAIN_CHECK_URL,
             "port": PORT
         },
         "warnings": [
             warning for warning in [
-                "Using default WEBHOOK_VERIFY_TOKEN" if current_webhook_token == "default_token" else None,
-                "APP_SECRET not set" if not current_app_secret else None,
-                "ACCESS_TOKEN not set" if not current_access_token else None,
-                "Cached and fresh webhook token values don't match" if WEBHOOK_VERIFY_TOKEN != current_webhook_token else None,
-                "Cached and fresh app secret values don't match" if APP_SECRET != current_app_secret else None,
-                "Cached and fresh access token values don't match" if ACCESS_TOKEN != current_access_token else None,
+                "Using default WEBHOOK_VERIFY_TOKEN" if WEBHOOK_VERIFY_TOKEN == "default_token" else None,
+                "APP_SECRET not set" if not APP_SECRET else None,
+                "ACCESS_TOKEN not set" if not ACCESS_TOKEN else None,
+                "PHONE_NUMBER_ID not set" if not PHONE_NUMBER_ID else None,
+                "DOMAIN_CHECK_URL not set" if not DOMAIN_CHECK_URL else None,
             ] if warning
         ],
         "railway_env_check": {
@@ -207,8 +224,10 @@ async def test_webhook_verification():
         "is_using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token",
         "app_secret_set": bool(APP_SECRET),
         "access_token_set": bool(ACCESS_TOKEN),
+        "phone_number_id_set": bool(PHONE_NUMBER_ID),
+        "domain_check_url": DOMAIN_CHECK_URL,
         "test_verification_url": f"/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
-        "full_test_url": f"https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
+        "full_test_url": f"https://https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
         "warnings": []
     }
     
@@ -221,6 +240,12 @@ async def test_webhook_verification():
         
     if not ACCESS_TOKEN:
         test_info["warnings"].append("⚠️  ACCESS_TOKEN not configured")
+    
+    if not PHONE_NUMBER_ID:
+        test_info["warnings"].append("⚠️  PHONE_NUMBER_ID not configured")
+    
+    if not DOMAIN_CHECK_URL:
+        test_info["warnings"].append("⚠️  DOMAIN_CHECK_URL not configured")
     
     logger.info(f"Test info: {json.dumps(test_info, indent=2)}")
     return test_info
@@ -274,7 +299,7 @@ async def verify_webhook(
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Handle incoming WhatsApp webhooks with enhanced debugging"""
+    """Handle incoming WhatsApp webhooks with enhanced debugging and domain bot logic"""
     logger.info("📨 INCOMING WEBHOOK")
     
     try:
@@ -353,15 +378,84 @@ async def handle_webhook(request: Request):
                             
                             if msg_type == "text":
                                 text_content = message.get("text", {})
-                                text_body = text_content.get("body", "")
+                                text_body = text_content.get("body", "").strip().lower()
                                 logger.info(f"            📝 Text: '{text_body}'")
+                                
+                                # BOT LOGIC: Check if it's a .ke domain query
+                                if text_body.endswith('.ke') or '.' not in text_body:  # Handle "example" -> "example.ke"
+                                    domain_query = text_body if text_body.endswith('.ke') else f"{text_body}.ke"
+                                    logger.info(f"🤖 Domain check requested: {domain_query}")
+                                    
+                                    # Step 1: Gracefully call domain service via HTTP (no security for now)
+                                    domain_result = {"available": False, "error": "Unknown error"}
+                                    try:
+                                        async with aiohttp.ClientSession() as session:
+                                            payload = {
+                                                "domain": domain_query,
+                                                "include_suggestions": True,
+                                                "include_pricing": True
+                                            }
+                                            async with session.post(
+                                                DOMAIN_CHECK_URL,
+                                                json=payload,
+                                                timeout=aiohttp.ClientTimeout(total=10)
+                                            ) as resp:
+                                                if resp.status == 200:
+                                                    api_response = await resp.json()
+                                                    if api_response.get("success"):
+                                                        domain_result = api_response.get("data", {})
+                                                    else:
+                                                        domain_result = {"error": api_response.get("error", "API error")}
+                                                else:
+                                                    error_text = await resp.text()
+                                                    logger.error(f"Domain API failed: {resp.status} - {error_text}")
+                                                    domain_result = {"error": f"HTTP {resp.status}"}
+                                    except Exception as domain_error:
+                                        logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
+                                        domain_result = {"error": "Service unavailable"}
+                                    
+                                    # Step 2: Format reply gracefully
+                                    if domain_result.get("error"):
+                                        reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Try again later!"
+                                    elif domain_result.get("available", False):
+                                        price = domain_result.get("price", domain_result.get("pricing", {}).get("first_year", "N/A"))
+                                        reply_text = f"✅ {domain_query} is AVAILABLE!\n💰 First year: {price}\n\nReply 'register {domain_query}' to start registration (or check another)."
+                                    else:
+                                        suggestions = domain_result.get("suggestions", [])
+                                        reply_text = f"❌ {domain_query} is NOT available.\n\n"
+                                        if suggestions:
+                                            reply_text += f"💡 Suggestions: {', '.join(suggestions[:3])}\n"
+                                        reply_text += "Try another .ke domain!"
+                                    
+                                    # Step 3: Send reply via WhatsApp API (with error handling)
+                                    try:
+                                        await send_whatsapp_reply(sender, reply_text, msg_id)
+                                        logger.info(f"✅ Domain reply sent to {sender} for {domain_query}")
+                                    except Exception as reply_error:
+                                        logger.error(f"Failed to send domain reply: {str(reply_error)}", exc_info=True)
+                                        
+                            else:
+                                # Help message for non-domain texts
+                                help_text = (
+                                    "Hi! I'm a .ke domain availability bot. "
+                                    "Send me a domain like 'example.ke' (or just 'example') to check if it's available. "
+                                    "Powered by [Your Domain Service]."
+                                )
+                                try:
+                                    await send_whatsapp_reply(sender, help_text, msg_id)
+                                    logger.info(f"ℹ️ Help reply sent to {sender}")
+                                except Exception as help_error:
+                                    logger.error(f"Failed to send help reply: {str(help_error)}", exc_info=True)
+                                
                             elif msg_type == "image":
                                 image_info = message.get("image", {})
                                 logger.info(f"            🖼️  Image ID: {image_info.get('id')}")
+                                # Optional: Reply "Thanks for the image!" or ignore
                             elif msg_type == "document":
                                 doc_info = message.get("document", {})
                                 logger.info(f"            📄 Document: {doc_info.get('filename')}")
-                            
+                                # Optional: Reply "Received your document!"
+                        
                         # Handle status updates
                         statuses = value.get("statuses", [])
                         logger.info(f"      📊 Statuses: {len(statuses)}")
@@ -399,13 +493,60 @@ async def handle_webhook(request: Request):
             }
         )
 
+async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
+    """Send a reply message via WhatsApp Cloud API with graceful error handling"""
+    if not ACCESS_TOKEN:
+        logger.error("❌ ACCESS_TOKEN not set - cannot send reply")
+        return
+    
+    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": message
+        }
+    }
+    
+    # Optional: Reply to specific message (for threading)
+    if replied_msg_id:
+        payload["context"] = {"message_id": replied_msg_id}
+    
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    reply_id = result.get('messages', [{}])[0].get('id')
+                    logger.info(f"✅ WhatsApp reply sent to {to}: ID {reply_id}")
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"❌ Failed to send WhatsApp reply to {to}: {resp.status} - {error_text}")
+                    if "unauthorized" in error_text.lower():
+                        logger.error("🔑 ACCESS_TOKEN may be invalid/expired - regenerate in Meta Dashboard")
+    except Exception as e:
+        logger.error(f"❌ Exception sending WhatsApp reply to {to}: {str(e)}", exc_info=True)
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "bot_features": {
+            "domain_check": bool(DOMAIN_CHECK_URL),
+            "whatsapp_replies": bool(ACCESS_TOKEN and PHONE_NUMBER_ID)
+        }
     }
 
 # Enhanced error handlers
@@ -461,5 +602,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=PORT,
         log_level="info",
-        access_log=True
+        access_log=True,
+        reload=False  # Set to True for local dev
     )
