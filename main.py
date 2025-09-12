@@ -7,9 +7,10 @@ import logging
 import sys
 import aiohttp
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from urllib.parse import quote, urlencode
 import re
+import asyncio
 
 # Configure detailed logging
 logging.basicConfig(
@@ -21,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
-    title="WhatsApp Webhook",
-    description="WhatsApp Business API Webhook with .ke Domain Bot",
-    version="1.0.0"
+    title="Smart WhatsApp Domain Bot",
+    description="Intelligent WhatsApp Business API Bot for .ke Domain Search",
+    version="2.0.0"
 )
 
 # Add CORS middleware
@@ -36,66 +37,46 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# Supported .ke extensions
-SUPPORTED_EXTENSIONS = [
-    ".co.ke", ".or.ke", ".ac.ke", ".go.ke", ".ne.ke", ".sc.ke",
-    ".ke", ".me.ke", ".info.ke"
-]
+# Enhanced .ke extensions with descriptions
+DOMAIN_EXTENSIONS = {
+    ".ke": "🇰🇪 General Kenya domains",
+    ".co.ke": "🏢 Commercial organizations",
+    ".or.ke": "🏛️ Non-profit organizations", 
+    ".ac.ke": "🎓 Academic institutions",
+    ".go.ke": "🏛️ Government entities",
+    ".ne.ke": "🌐 Network providers",
+    ".sc.ke": "🔬 Scientific organizations",
+    ".me.ke": "👤 Personal domains",
+    ".info.ke": "ℹ️ Information sites"
+}
 
-# In-memory user state store (replace with Redis/DB in production)
+# Enhanced user state management
 user_states: Dict[str, Dict[str, Any]] = {}
+domain_cache: Dict[str, Dict[str, Any]] = {}  # Cache API results
 
-# Debug environment variables
-def debug_environment():
-    logger.info("🔍 DEBUGGING ENVIRONMENT VARIABLES")
-    logger.info("=" * 50)
-    logger.info(f"Python version: {sys.version}")
-    logger.info(f"Current working directory: {os.getcwd()}")
-    logger.info(f"Environment variables count: {len(os.environ)}")
-    
-    env_vars = [
-        "WEBHOOK_VERIFY_TOKEN", "APP_SECRET", "ACCESS_TOKEN", "PHONE_NUMBER_ID",
-        "VERSION", "DOMAIN_CHECK_URL", "ALLOWED_ORIGINS", "PORT"
-    ]
-    
-    logger.info("\n📋 ENVIRONMENT VARIABLES:")
-    for var in env_vars:
-        value = os.getenv(var)
-        if value:
-            if var in ["APP_SECRET", "ACCESS_TOKEN"]:
-                masked_value = f"{value[:10]}{'*' * (len(value) - 10)}" if len(value) > 10 else "*" * len(value)
-                logger.info(f"✅ {var}: {masked_value} (length: {len(value)})")
-            else:
-                logger.info(f"✅ {var}: {value}")
-        else:
-            logger.warning(f"❌ {var}: NOT SET")
-    
-    logger.info("\n🌍 ALL ENVIRONMENT VARIABLES:")
-    for key, value in sorted(os.environ.items()):
-        if any(sensitive in key.upper() for sensitive in ['TOKEN', 'SECRET', 'KEY', 'PASSWORD']):
-            masked_value = f"{value[:5]}***" if len(value) > 5 else "***"
-            logger.info(f"  {key}: {masked_value}")
-        else:
-            logger.info(f"  {key}: {value}")
-    logger.info("=" * 50)
+# Smart domain parsing patterns
+DOMAIN_PATTERNS = {
+    'full_domain': re.compile(r'^([a-z0-9-]+)\.(ke|co\.ke|or\.ke|ac\.ke|go\.ke|ne\.ke|sc\.ke|me\.ke|info\.ke)$', re.IGNORECASE),
+    'base_domain': re.compile(r'^([a-z0-9-]+)$', re.IGNORECASE),
+    'partial_extension': re.compile(r'^([a-z0-9-]+)\.(co|or|ac|go|ne|sc|me|info)$', re.IGNORECASE)
+}
 
-# Get environment variable with error handling
 def get_env_var(var_name: str, default: str = None, required: bool = False) -> str:
+    """Get environment variable with proper logging"""
     value = os.getenv(var_name, default)
     if required and not value:
         logger.error(f"❌ CRITICAL: Required environment variable {var_name} is not set!")
         raise ValueError(f"Required environment variable {var_name} is missing")
-    if value:
-        if var_name in ["APP_SECRET", "ACCESS_TOKEN"]:
-            logger.info(f"✅ {var_name}: Set (length: {len(value)})")
-        else:
-            logger.info(f"✅ {var_name}: {value}")
+    
+    if value and var_name in ["APP_SECRET", "ACCESS_TOKEN"]:
+        logger.info(f"✅ {var_name}: Set (length: {len(value)})")
+    elif value:
+        logger.info(f"✅ {var_name}: {value}")
     else:
         logger.warning(f"⚠️ {var_name}: Using default value '{default}'")
     return value
 
-# Load environment variables
-debug_environment()
+# Load configuration
 try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
@@ -105,507 +86,579 @@ try:
     DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "https://api.digikenya.co.ke/api/v1/domains/availability/check")
     PORT = int(get_env_var("PORT", "8080"))
     
-    logger.info(f"🚀 Configuration loaded successfully")
-    logger.info(f"   - Verify Token: {WEBHOOK_VERIFY_TOKEN[:10]}...")
-    logger.info(f"   - App Secret: {'SET' if APP_SECRET else 'NOT SET'}")
-    logger.info(f"   - Access Token: {'SET' if ACCESS_TOKEN else 'NOT SET'}")
-    logger.info(f"   - Phone Number ID: {PHONE_NUMBER_ID or 'NOT SET'}")
-    logger.info(f"   - API Version: {VERSION}")
-    logger.info(f"   - Domain Check URL: {DOMAIN_CHECK_URL}")
-    logger.info(f"   - Port: {PORT}")
+    logger.info("🚀 Smart Domain Bot Configuration Loaded Successfully")
 except Exception as e:
-    logger.error(f"❌ Failed to load configuration: {e}")
+    logger.error(f"❌ Configuration error: {e}")
     raise
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("🎉 APPLICATION STARTING UP")
-    logger.info(f"FastAPI app starting at {datetime.utcnow().isoformat()}")
-
-def get_user_state(user_phone: str) -> Dict[str, Any]:
-    if user_phone not in user_states:
-        user_states[user_phone] = {
-            "step": "greeting",
-            "last_domain": None,
-            "selected_extension": None
+class SmartDomainBot:
+    """Enhanced domain bot with intelligent conversation flow"""
+    
+    def __init__(self):
+        self.conversation_states = {
+            "greeting": "👋 Welcome state",
+            "searching": "🔍 Domain search mode",
+            "extension_select": "📋 Extension selection",
+            "results": "📊 Results display",
+            "bulk_search": "🔄 Multiple domain check"
         }
-    return user_states[user_phone]
-
-def update_user_state(user_phone: str, state: Dict[str, Any]):
-    user_states[user_phone] = {**get_user_state(user_phone), **state}
-
-def is_greeting(text: str) -> bool:
-    greetings = ["hi", "hello", "hey", "hii", "helloo", "start", "begin"]
-    return text.lower().strip() in greetings or len(text.strip()) < 3
-
-async def send_interactive_reply(to: str, message: str, replied_msg_id: str = None, buttons: list = None):
-    """Send interactive button reply via WhatsApp API"""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
-        return
     
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    
-    # Fix button format for WhatsApp
-    formatted_buttons = [
-        {
-            "type": "reply",
-            "reply": {
-                "id": btn["id"],
-                "title": btn["title"][:20]  # WhatsApp limits title to 20 chars
+    def get_user_state(self, user_phone: str) -> Dict[str, Any]:
+        """Get or create user state with defaults"""
+        if user_phone not in user_states:
+            user_states[user_phone] = {
+                "step": "greeting",
+                "search_history": [],
+                "current_domain": None,
+                "preferred_extensions": [],
+                "last_activity": datetime.utcnow().isoformat()
             }
-        } for btn in (buttons or [])
-    ]
+        return user_states[user_phone]
     
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": message[:4096]  # WhatsApp text limit
-            },
-            "action": {
-                "buttons": formatted_buttons
+    def update_user_state(self, user_phone: str, updates: Dict[str, Any]):
+        """Update user state with timestamp"""
+        state = self.get_user_state(user_phone)
+        state.update(updates)
+        state["last_activity"] = datetime.utcnow().isoformat()
+        user_states[user_phone] = state
+        logger.info(f"👤 Updated state for {user_phone}: {updates}")
+    
+    def parse_domain_input(self, text: str) -> Dict[str, Any]:
+        """Intelligently parse user domain input"""
+        text = text.strip().lower()
+        
+        # Check for full domain (e.g., "elijah.co.ke")
+        full_match = DOMAIN_PATTERNS['full_domain'].match(text)
+        if full_match:
+            return {
+                "type": "full_domain",
+                "base": full_match.group(1),
+                "extension": full_match.group(2),
+                "domains_to_check": [text]
             }
-        }
-    }
+        
+        # Check for partial extension (e.g., "elijah.co")
+        partial_match = DOMAIN_PATTERNS['partial_extension'].match(text)
+        if partial_match:
+            base = partial_match.group(1)
+            partial_ext = partial_match.group(2)
+            full_ext = f"{partial_ext}.ke"
+            return {
+                "type": "partial_extension",
+                "base": base,
+                "extension": full_ext,
+                "domains_to_check": [f"{base}.{full_ext}"]
+            }
+        
+        # Base domain only (e.g., "elijah")
+        base_match = DOMAIN_PATTERNS['base_domain'].match(text)
+        if base_match:
+            base = base_match.group(1)
+            return {
+                "type": "base_domain",
+                "base": base,
+                "extension": None,
+                "domains_to_check": [f"{base}{ext}" for ext in DOMAIN_EXTENSIONS.keys()]
+            }
+        
+        return {"type": "invalid", "error": "Invalid domain format"}
     
-    if replied_msg_id:
-        payload["context"] = {"message_id": replied_msg_id}
-    
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    logger.info(f"🔘 Sending interactive buttons: {json.dumps(formatted_buttons, indent=2)}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    reply_id = result.get('messages', [{}])[0].get('id')
-                    logger.info(f"✅ Interactive reply sent to {to}: ID {reply_id}")
+    def is_greeting(self, text: str) -> bool:
+        """Enhanced greeting detection"""
+        greetings = [
+            "hi", "hello", "hey", "hii", "helloo", "start", "begin", 
+            "menu", "main", "home", "help", "hola", "jambo", "habari"
+        ]
+        text_clean = text.lower().strip()
+        return (text_clean in greetings or 
+                len(text_clean) <= 3 or 
+                any(greeting in text_clean for greeting in ["good morning", "good afternoon", "good evening"]))
+
+    async def check_domains_batch(self, domains: List[str]) -> Dict[str, Any]:
+        """Check multiple domains efficiently with caching"""
+        results = {"available": [], "unavailable": [], "errors": []}
+        
+        for domain in domains:
+            # Check cache first
+            if domain in domain_cache:
+                cached = domain_cache[domain]
+                if cached.get("available"):
+                    results["available"].append(cached)
                 else:
-                    error_text = await resp.text()
-                    logger.error(f"❌ Failed to send interactive reply to {to}: {resp.status} - {error_text}")
-                    raise Exception(f"WhatsApp API error: {error_text}")
-    except Exception as e:
-        logger.error(f"❌ Exception sending interactive reply to {to}: {str(e)}", exc_info=True)
-
-async def send_template_reply(to: str, template_name: str, replied_msg_id: str = None):
-    """Send a predefined WhatsApp message template"""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        logger.error("❌ Cannot send template - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
-        return
-    
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    
-    # Template: Must be created in Meta Business Manager first
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": "en"},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": ", ".join(SUPPORTED_EXTENSIONS)}  # Pass extensions
-                    ]
-                },
-                {
-                    "type": "button",
-                    "sub_type": "quick_reply",
-                    "index": 0,
-                    "parameters": [{"type": "payload", "payload": "search_domains"}]
-                },
-                {
-                    "type": "button",
-                    "sub_type": "quick_reply",
-                    "index": 1,
-                    "parameters": [{"type": "payload", "payload": "visit_website"}]
+                    results["unavailable"].append(cached)
+                continue
+            
+            # API call for uncached domains
+            try:
+                params = {
+                    "domain": quote(domain),
+                    "include_pricing": "true",
+                    "include_suggestions": "false"  # Reduce API response size
                 }
-            ]
-        }
-    }
-    
-    if replied_msg_id:
-        payload["context"] = {"message_id": replied_msg_id}
-    
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    reply_id = result.get('messages', [{}])[0].get('id')
-                    logger.info(f"✅ Template reply sent to {to}: ID {reply_id}")
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"❌ Failed to send template reply to {to}: {resp.status} - {error_text}")
-                    if "template not found" in error_text.lower():
-                        logger.error("⚠️ Template not configured in Meta Business Manager")
-    except Exception as e:
-        logger.error(f"❌ Exception sending template reply to {to}: {str(e)}", exc_info=True)
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        DOMAIN_CHECK_URL,
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as resp:
+                        if resp.status == 200:
+                            api_response = await resp.json()
+                            if api_response.get("success"):
+                                domain_data = api_response.get("data", {})
+                                domain_data["domain"] = domain
+                                
+                                # Cache the result
+                                domain_cache[domain] = domain_data
+                                
+                                if domain_data.get("available"):
+                                    results["available"].append(domain_data)
+                                else:
+                                    results["unavailable"].append(domain_data)
+                            else:
+                                error_info = {"domain": domain, "error": api_response.get("error", "API error")}
+                                results["errors"].append(error_info)
+                        else:
+                            error_info = {"domain": domain, "error": f"HTTP {resp.status}"}
+                            results["errors"].append(error_info)
+                            
+            except asyncio.TimeoutError:
+                results["errors"].append({"domain": domain, "error": "Request timeout"})
+            except Exception as e:
+                results["errors"].append({"domain": domain, "error": str(e)})
+        
+        return results
 
-async def send_whatsapp_reply(to: str, message: str, replied_msg_id: str = None):
-    """Send a text reply via WhatsApp Cloud API"""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        logger.error("❌ Cannot send reply - ACCESS_TOKEN or PHONE_NUMBER_ID missing")
-        return
-    
-    url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
-    
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "text",
-        "text": {
-            "preview_url": False,
-            "body": message[:4096]
+    def format_domain_results(self, results: Dict[str, Any], base_domain: str) -> str:
+        """Format domain search results in a user-friendly way"""
+        available = results.get("available", [])
+        unavailable = results.get("unavailable", [])
+        errors = results.get("errors", [])
+        
+        if not available and not unavailable:
+            return f"❌ Sorry, couldn't check domains for '{base_domain}' right now. Please try again later."
+        
+        message_parts = []
+        
+        # Available domains (priority)
+        if available:
+            message_parts.append("✅ *AVAILABLE DOMAINS*")
+            for domain_info in available[:5]:  # Limit to top 5
+                domain = domain_info.get("domain", "")
+                price = domain_info.get("price", domain_info.get("pricing", {}).get("first_year", "Contact us"))
+                extension = "." + domain.split(".", 1)[1] if "." in domain else ""
+                ext_desc = DOMAIN_EXTENSIONS.get(extension, "Domain")
+                message_parts.append(f"🟢 *{domain}*\n   {ext_desc}\n   💰 {price}")
+        
+        # Unavailable domains summary
+        if unavailable:
+            unavailable_count = len(unavailable)
+            message_parts.append(f"\n❌ *{unavailable_count} domains unavailable*")
+            if unavailable_count <= 3:
+                for domain_info in unavailable:
+                    domain = domain_info.get("domain", "")
+                    message_parts.append(f"🔴 {domain}")
+        
+        # Errors summary
+        if errors:
+            error_count = len(errors)
+            message_parts.append(f"\n⚠️ {error_count} domains couldn't be checked")
+        
+        result_message = "\n".join(message_parts)
+        
+        # Add call-to-action
+        if available:
+            result_message += f"\n\n🎯 *Ready to register?*\nChoose a domain above or visit: https://digikenya.co.ke"
+        else:
+            result_message += f"\n\n💡 Try different variations of '{base_domain}' or visit our website for more options."
+        
+        return result_message
+
+    async def send_interactive_message(self, to: str, message: str, buttons: List[Dict] = None, replied_msg_id: str = None):
+        """Send enhanced interactive message with better formatting"""
+        if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+            logger.error("❌ Cannot send message - credentials missing")
+            return False
+        
+        url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
+        
+        # Format buttons for WhatsApp API
+        if buttons:
+            formatted_buttons = []
+            for i, btn in enumerate(buttons[:3]):  # WhatsApp allows max 3 buttons
+                formatted_buttons.append({
+                    "type": "reply",
+                    "reply": {
+                        "id": btn.get("id", f"btn_{i}"),
+                        "title": btn.get("title", "Button")[:20]  # 20 char limit
+                    }
+                })
+            
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": message[:1024]},  # WhatsApp limit
+                    "action": {"buttons": formatted_buttons}
+                }
+            }
+        else:
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "text",
+                "text": {"preview_url": True, "body": message[:4096]}
+            }
+        
+        if replied_msg_id:
+            payload["context"] = {"message_id": replied_msg_id}
+        
+        headers = {
+            "Authorization": f"Bearer {ACCESS_TOKEN}",
+            "Content-Type": "application/json"
         }
-    }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        msg_id = result.get('messages', [{}])[0].get('id')
+                        logger.info(f"✅ Message sent to {to}: ID {msg_id}")
+                        return True
+                    else:
+                        error_text = await resp.text()
+                        logger.error(f"❌ Failed to send message to {to}: {resp.status} - {error_text}")
+                        return False
+        except Exception as e:
+            logger.error(f"❌ Exception sending message to {to}: {str(e)}")
+            return False
+
+    async def handle_user_message(self, sender: str, message_text: str, message_id: str):
+        """Main conversation handler with enhanced flow"""
+        text = message_text.strip()
+        state = self.get_user_state(sender)
+        current_step = state.get("step", "greeting")
+        
+        logger.info(f"🧠 Processing message from {sender}: '{text}' (Step: {current_step})")
+        
+        # Handle greetings and menu requests
+        if self.is_greeting(text):
+            await self.send_welcome_message(sender, message_id)
+            return
+        
+        # Handle domain search
+        if current_step in ["greeting", "searching"] or text.startswith(("check", "search", "find")):
+            # Extract domain from text (remove common prefixes)
+            domain_text = re.sub(r'^(check|search|find|domain)\s+', '', text, flags=re.IGNORECASE).strip()
+            
+            if domain_text:
+                await self.process_domain_search(sender, domain_text, message_id)
+            else:
+                await self.send_search_prompt(sender, message_id)
+            return
+        
+        # Handle button interactions and follow-ups
+        if current_step == "results":
+            if text.lower() in ["more", "other", "alternatives"]:
+                last_domain = state.get("current_domain")
+                if last_domain:
+                    await self.process_domain_search(sender, last_domain, message_id, show_all=True)
+                return
+            elif text.lower() in ["new", "different", "another"]:
+                await self.send_search_prompt(sender, message_id)
+                return
+        
+        # Default: treat as domain search
+        await self.process_domain_search(sender, text, message_id)
+
+    async def send_welcome_message(self, to: str, replied_msg_id: str = None):
+        """Send enhanced welcome message"""
+        self.update_user_state(to, {"step": "greeting"})
+        
+        extensions_list = "\n".join([f"• *{ext}* - {desc}" for ext, desc in list(DOMAIN_EXTENSIONS.items())[:6]])
+        
+        welcome_text = (
+            "🚀 *Welcome to DigiKenya Smart Domain Bot!*\n\n"
+            "I'll help you find the perfect .ke domain quickly and easily.\n\n"
+            "🎯 *Popular Extensions:*\n"
+            f"{extensions_list}\n"
+            "...and more!\n\n"
+            "💬 *Just type your desired domain name*\n"
+            "Examples: 'mycompany', 'john.co.ke', 'myblog'"
+        )
+        
+        buttons = [
+            {"id": "search_domains", "title": "🔍 Search Now"},
+            {"id": "view_extensions", "title": "📋 All Extensions"},
+            {"id": "visit_website", "title": "🌐 Visit Website"}
+        ]
+        
+        await self.send_interactive_message(to, welcome_text, buttons, replied_msg_id)
+
+    async def send_search_prompt(self, to: str, replied_msg_id: str = None):
+        """Send search prompt message"""
+        self.update_user_state(to, {"step": "searching"})
+        
+        prompt_text = (
+            "🔍 *What domain would you like to check?*\n\n"
+            "💡 *You can search:*\n"
+            "• Just the name: `mycompany`\n"
+            "• With extension: `mycompany.co.ke`\n"
+            "• Partial: `mycompany.co`\n\n"
+            "I'll check all available .ke extensions for you! ✨"
+        )
+        
+        await self.send_interactive_message(to, prompt_text, replied_msg_id=replied_msg_id)
+
+    async def process_domain_search(self, sender: str, domain_input: str, message_id: str, show_all: bool = False):
+        """Process domain search with intelligent parsing"""
+        # Parse the domain input
+        parsed = self.parse_domain_input(domain_input)
+        
+        if parsed["type"] == "invalid":
+            error_text = (
+                "❌ *Invalid domain format*\n\n"
+                "Please try:\n"
+                "• `mycompany` (I'll check all extensions)\n"
+                "• `mycompany.co.ke` (specific domain)\n"
+                "• `mycompany.co` (I'll add .ke)\n\n"
+                "What would you like to search for?"
+            )
+            await self.send_interactive_message(sender, error_text, replied_msg_id=message_id)
+            return
+        
+        base_domain = parsed["base"]
+        domains_to_check = parsed["domains_to_check"]
+        
+        # Update user state
+        self.update_user_state(sender, {
+            "step": "searching",
+            "current_domain": base_domain
+        })
+        
+        # Send "searching" message
+        search_count = len(domains_to_check)
+        searching_text = f"🔍 Searching {search_count} domain{'s' if search_count > 1 else ''} for '*{base_domain}*'...\n\nThis may take a moment ⏳"
+        await self.send_interactive_message(sender, searching_text, replied_msg_id=message_id)
+        
+        # Check domains
+        results = await self.check_domains_batch(domains_to_check)
+        
+        # Format and send results
+        results_text = self.format_domain_results(results, base_domain)
+        
+        # Add interactive buttons based on results
+        buttons = []
+        if results.get("available"):
+            buttons.append({"id": "register_domain", "title": "🛒 Register Now"})
+            
+        if len(results.get("unavailable", [])) > 0 or results.get("errors"):
+            buttons.append({"id": "try_variations", "title": "💡 Try Variations"})
+            
+        buttons.append({"id": "new_search", "title": "🔍 New Search"})
+        
+        await self.send_interactive_message(sender, results_text, buttons)
+        
+        # Update state with results
+        self.update_user_state(sender, {
+            "step": "results",
+            "last_results": results,
+            "search_history": self.get_user_state(sender)["search_history"] + [base_domain]
+        })
+
+    async def handle_button_click(self, sender: str, button_id: str, message_id: str):
+        """Handle interactive button clicks"""
+        logger.info(f"🔘 Button clicked by {sender}: {button_id}")
+        
+        if button_id == "search_domains":
+            await self.send_search_prompt(sender, message_id)
+            
+        elif button_id == "view_extensions":
+            extensions_text = "📋 *All Available .ke Extensions:*\n\n"
+            extensions_text += "\n".join([f"• *{ext}* - {desc}" for ext, desc in DOMAIN_EXTENSIONS.items()])
+            extensions_text += "\n\n💬 Type your domain name to get started!"
+            await self.send_interactive_message(sender, extensions_text, replied_msg_id=message_id)
+            
+        elif button_id == "visit_website":
+            website_text = (
+                "🌐 *Visit DigiKenya*\n\n"
+                "Explore all our services:\n"
+                "👉 https://digikenya.co.ke\n\n"
+                "• Domain Registration\n"
+                "• Web Hosting\n"
+                "• Website Design\n"
+                "• Digital Solutions\n\n"
+                "💬 Or continue searching domains here!"
+            )
+            buttons = [{"id": "new_search", "title": "🔍 Search Domains"}]
+            await self.send_interactive_message(sender, website_text, buttons, message_id)
+            
+        elif button_id == "register_domain":
+            state = self.get_user_state(sender)
+            last_results = state.get("last_results", {})
+            available = last_results.get("available", [])
+            
+            if available:
+                register_text = "🛒 *Ready to Register?*\n\nChoose from your available domains:\n\n"
+                for domain_info in available[:3]:
+                    domain = domain_info.get("domain", "")
+                    price = domain_info.get("price", "Contact us")
+                    register_url = f"https://digikenya.co.ke/register?domain={quote(domain)}"
+                    register_text += f"• *{domain}* ({price})\n  👉 {register_url}\n\n"
+                
+                register_text += "💬 Need help? Contact our support team!"
+                await self.send_interactive_message(sender, register_text, replied_msg_id=message_id)
+            
+        elif button_id == "new_search":
+            await self.send_search_prompt(sender, message_id)
+            
+        elif button_id == "try_variations":
+            state = self.get_user_state(sender)
+            current_domain = state.get("current_domain")
+            if current_domain:
+                variation_text = (
+                    f"💡 *Try these variations of '{current_domain}':*\n\n"
+                    f"• {current_domain}ke, {current_domain}kenya\n"
+                    f"• my{current_domain}, get{current_domain}\n"
+                    f"• {current_domain}online, {current_domain}digital\n\n"
+                    "Just type any variation to search! ✨"
+                )
+                await self.send_interactive_message(sender, variation_text, replied_msg_id=message_id)
+
+# Initialize the smart bot
+smart_bot = SmartDomainBot()
+
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"), 
+    hub_challenge: str = Query(None, alias="hub.challenge")
+):
+    """Webhook verification endpoint"""
+    logger.info(f"🔐 Webhook verification request")
+    logger.info(f"   Mode: {hub_mode}")
+    logger.info(f"   Token: {hub_verify_token}")
+    logger.info(f"   Challenge: {hub_challenge}")
     
-    if replied_msg_id:
-        payload["context"] = {"message_id": replied_msg_id}
-    
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    reply_id = result.get('messages', [{}])[0].get('id')
-                    logger.info(f"✅ WhatsApp reply sent to {to}: ID {reply_id}")
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"❌ Failed to send WhatsApp reply to {to}: {resp.status} - {error_text}")
-                    if "unauthorized" in error_text.lower():
-                        logger.error("🔑 ACCESS_TOKEN may be invalid/expired - regenerate in Meta Dashboard")
-    except Exception as e:
-        logger.error(f"❌ Exception sending WhatsApp reply to {to}: {str(e)}", exc_info=True)
+    if hub_mode == "subscribe" and hub_verify_token == WEBHOOK_VERIFY_TOKEN:
+        logger.info("✅ Webhook verified successfully")
+        return PlainTextResponse(content=hub_challenge, status_code=200)
+    else:
+        logger.error("❌ Webhook verification failed")
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Handle incoming WhatsApp webhooks with conversational domain bot logic"""
-    logger.info("📨 INCOMING WEBHOOK")
+    """Enhanced webhook handler with smart conversation flow"""
+    logger.info("📨 Incoming webhook")
     
     try:
-        logger.info("📋 Request Headers:")
-        for header_name, header_value in request.headers.items():
-            logger.info(f"   {header_name}: {header_value}")
-        
         body = await request.body()
-        logger.info(f"📦 Raw body length: {len(body)} bytes")
+        webhook_data = json.loads(body.decode())
         
-        if not body:
-            logger.error("❌ Empty request body")
-            raise HTTPException(status_code=400, detail="Empty request body")
+        logger.info(f"📦 Webhook data: {json.dumps(webhook_data, indent=2)[:500]}...")
         
-        try:
-            webhook_data = json.loads(body.decode())
-            logger.info("✅ JSON parsed successfully")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON decode error: {e}")
-            logger.error(f"Raw body: {body.decode()[:1000]}...")
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-        
-        logger.info("📨 Webhook Data Structure:")
-        logger.info(json.dumps(webhook_data, indent=2))
-        
-        if not isinstance(webhook_data, dict):
-            logger.error("❌ Webhook data is not a dictionary")
-            raise HTTPException(status_code=400, detail="Webhook data must be a JSON object")
-        
-        webhook_object = webhook_data.get("object")
-        logger.info(f"🎯 Webhook object: {webhook_object}")
-        
-        if webhook_object == "whatsapp_business_account":
-            logger.info("✅ WhatsApp Business Account webhook detected")
-            
+        if webhook_data.get("object") == "whatsapp_business_account":
             entries = webhook_data.get("entry", [])
-            logger.info(f"📋 Processing {len(entries)} entries")
             
-            for i, entry in enumerate(entries):
-                logger.info(f"🔍 Processing entry {i + 1}/{len(entries)}")
-                logger.info(f"   Entry ID: {entry.get('id')}")
-                
+            for entry in entries:
                 changes = entry.get("changes", [])
-                logger.info(f"   Changes: {len(changes)}")
                 
-                for j, change in enumerate(changes):
-                    logger.info(f"   🔄 Processing change {j + 1}/{len(changes)}")
-                    field = change.get("field")
-                    logger.info(f"      Field: {field}")
-                    
-                    if field == "messages":
+                for change in changes:
+                    if change.get("field") == "messages":
                         value = change.get("value", {})
                         messages = value.get("messages", [])
-                        logger.info(f"      📱 Messages: {len(messages)}")
                         
-                        for k, message in enumerate(messages):
-                            logger.info(f"         💬 Message {k + 1}/{len(messages)}")
+                        for message in messages:
                             sender = message.get("from")
                             msg_type = message.get("type")
                             msg_id = message.get("id")
-                            timestamp = message.get("timestamp")
                             
-                            logger.info(f"            From: {sender}")
-                            logger.info(f"            Type: {msg_type}")
-                            logger.info(f"            ID: {msg_id}")
-                            logger.info(f"            Timestamp: {timestamp}")
+                            logger.info(f"💬 Message from {sender} (type: {msg_type})")
                             
                             # Handle interactive button responses
                             if msg_type == "interactive":
                                 interactive = message.get("interactive", {})
                                 if interactive.get("type") == "button_reply":
-                                    reply_data = interactive.get("button_reply", {})
-                                    payload = reply_data.get("id", "")
-                                    logger.info(f"            🔘 Button clicked: {payload}")
-                                    state = get_user_state(sender)
-                                    if payload == "search_domains":
-                                        update_user_state(sender, {"step": "searching"})
-                                        reply_text = "🔍 Great! What domain would you like to check? (e.g., 'example' for .ke extensions)"
-                                        await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                    elif payload == "visit_website":
-                                        reply_text = "🌐 Visit our website to browse all services: https://digikenya.co.ke\n\nOr reply 'menu' to return to main options."
-                                        await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                    elif payload.startswith("register_"):
-                                        domain = payload.replace("register_", "")
-                                        register_url = f"https://digikenya.co.ke/register?domain={quote(domain)}"
-                                        reply_text = f"🛒 Ready to register {domain}? Click here: {register_url}\n\nOr reply 'menu' for more options."
-                                        await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        update_user_state(sender, {"step": "greeting"})
-                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                    else:
-                                        logger.warning(f"Unknown button payload: {payload}")
+                                    button_data = interactive.get("button_reply", {})
+                                    button_id = button_data.get("id", "")
+                                    await smart_bot.handle_button_click(sender, button_id, msg_id)
                             
-                            if msg_type == "text":
+                            # Handle text messages
+                            elif msg_type == "text":
                                 text_content = message.get("text", {})
-                                text_body = text_content.get("body", "").strip().lower()
-                                logger.info(f"            📝 Text: '{text_body}'")
-                                
-                                state = get_user_state(sender)
-                                logger.info(f"            🗂️ User state: {state}")
-                                
-                                # Greeting or menu request
-                                if is_greeting(text_body) or text_body == "menu":
-                                    update_user_state(sender, {"step": "greeting"})
-                                    extensions_list = "\n".join([f"• {ext}" for ext in SUPPORTED_EXTENSIONS])
-                                    reply_text = (
-                                        f"👋 Hi! Welcome to DigiKenya Domain Bot.\n\n"
-                                        f"Available .ke extensions you can register:\n"
-                                        f"{extensions_list}\n\n"
-                                        f"What would you like to do?"
-                                    )
-                                    # Send interactive message with buttons
-                                    await send_interactive_reply(sender, reply_text, msg_id, [
-                                        {"id": "search_domains", "title": "🔍 Search Domains"},
-                                        {"id": "visit_website", "title": "🌐 Visit Website"}
-                                    ])
-                                    return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                
-                                # Handle search step
-                                if state.get("step") == "searching":
-                                    domain_match = re.match(r'^([a-z0-9-]+\.?)(ke|co\.ke|or\.ke|ac\.ke|go\.ke|ne\.ke|sc\.ke|me\.ke|info\.ke)?$', text_body)
-                                    if domain_match:
-                                        domain_query = domain_match.group(1)
-                                        if not domain_match.group(2):
-                                            domain_query += ".ke"  # Default to .ke
-                                        logger.info(f"🤖 Domain search for: {domain_query}")
-                                        
-                                        # Call domain API
-                                        domain_result = {"available": False, "error": "Unknown error"}
-                                        try:
-                                            params = {
-                                                "domain": quote(domain_query),
-                                                "include_pricing": "true",
-                                                "include_suggestions": "true"
-                                            }
-                                            api_url = f"{DOMAIN_CHECK_URL}?{urlencode(params)}"
-                                            logger.info(f"🔗 Calling domain API: {api_url}")
-                                            async with aiohttp.ClientSession() as session:
-                                                async with session.get(
-                                                    DOMAIN_CHECK_URL,
-                                                    params=params,
-                                                    timeout=aiohttp.ClientTimeout(total=10)
-                                                ) as resp:
-                                                    logger.info(f"📡 Domain API response status: {resp.status}")
-                                                    if resp.status == 200:
-                                                        api_response = await resp.json()
-                                                        logger.info(f"📊 Domain API response preview: {json.dumps(api_response, indent=2)[:500]}...")
-                                                        if api_response.get("success"):
-                                                            domain_result = api_response.get("data", {})
-                                                        else:
-                                                            domain_result = {"error": api_response.get("error", "API error")}
-                                                    else:
-                                                        error_text = await resp.text()
-                                                        logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")
-                                                        domain_result = {"error": f"HTTP {resp.status}: {error_text[:100] if len(error_text) > 100 else error_text}"}
-                                        except Exception as domain_error:
-                                            logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
-                                            domain_result = {"error": "Service unavailable"}
-                                        
-                                        # Format results with button for registration
-                                        if domain_result.get("error"):
-                                            reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Reply 'menu' to start over."
-                                            await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        elif domain_result.get("available", False):
-                                            price = domain_result.get("price", domain_result.get("pricing", {}).get("first_year", "N/A"))
-                                            reply_text = f"✅ {domain_query} is AVAILABLE!\n💰 First year: {price}\n\nReady to register?"
-                                            await send_interactive_reply(sender, reply_text, msg_id, [
-                                                {"id": f"register_{domain_query}", "title": "🛒 Register Now"}
-                                            ])
-                                            update_user_state(sender, {"step": "results", "last_domain": domain_query})
-                                        else:
-                                            suggestions = domain_result.get("suggestions", [])
-                                            reply_text = f"❌ {domain_query} is NOT available.\n\n"
-                                            if suggestions:
-                                                sug_domains = [s.get("domain", "") for s in suggestions if isinstance(s, dict)][:3]
-                                                if sug_domains:
-                                                    reply_text += f"💡 Suggestions: {', '.join(sug_domains)}\n"
-                                            reply_text += "Pick one to check or reply 'menu'."
-                                            buttons = [{"id": f"register_{s.get('domain', '')}", "title": s.get("domain", "")[:20] if s.get("available") else "Taken"} for s in suggestions[:3] if s.get("available")]
-                                            if buttons:
-                                                await send_interactive_reply(sender, reply_text, msg_id, buttons)
-                                            else:
-                                                await send_whatsapp_reply(sender, reply_text, msg_id)
-                                            update_user_state(sender, {"step": "results", "last_domain": domain_query})
-                                        
-                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                    else:
-                                        reply_text = "❌ Invalid domain format. Try something like 'example' or 'example.ke'. Reply 'menu' for options."
-                                        await send_whatsapp_reply(sender, reply_text, msg_id)
-                                        return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                
-                                # Default: Show menu
-                                reply_text = "👋 Hi! Reply 'menu' for main options or say 'hi' to start."
-                                await send_whatsapp_reply(sender, reply_text, msg_id)
-                                return JSONResponse({"status": "success", "processed_entries": len(entries)})
-                                
-                            elif msg_type == "image":
-                                image_info = message.get("image", {})
-                                logger.info(f"            🖼️ Image ID: {image_info.get('id')}")
-                                reply_text = "📸 Thanks for the image! Reply 'menu' to continue with domain search."
-                                await send_whatsapp_reply(sender, reply_text, msg_id)
-                            elif msg_type == "document":
-                                doc_info = message.get("document", {})
-                                logger.info(f"            📄 Document: {doc_info.get('filename')}")
-                                reply_text = "📄 Received your document! Reply 'menu' to continue with domain search."
-                                await send_whatsapp_reply(sender, reply_text, msg_id)
-                        
-                        statuses = value.get("statuses", [])
-                        logger.info(f"      📊 Statuses: {len(statuses)}")
-                        for status in statuses:
-                            logger.info(f"         Status: {status.get('status')} for message {status.get('id')}")
-                    else:
-                        logger.info(f"      ⏭️ Skipping field: {field}")
+                                text_body = text_content.get("body", "").strip()
+                                await smart_bot.handle_user_message(sender, text_body, msg_id)
+                            
+                            # Handle other message types
+                            else:
+                                fallback_text = (
+                                    "👋 I can help you search for .ke domains!\n\n"
+                                    "Just type the domain name you want to check.\n"
+                                    "Example: 'mycompany' or 'myblog.ke'\n\n"
+                                    "🚀 Plus explore our digital services:\n"
+                                    "• DNS hosting • SSL certificates • AI development"
+                                )
+                                await smart_bot.send_interactive_message(sender, fallback_text, replied_msg_id=msg_id)
             
-            logger.info("✅ Webhook processed successfully")
-            return JSONResponse({"status": "success", "processed_entries": len(entries)})
+            return JSONResponse({"status": "success", "message": "Processed successfully"})
         
         else:
-            logger.warning(f"❓ Unknown webhook object: {webhook_object}")
-            return JSONResponse({
-                "status": "ignored",
-                "reason": f"Unknown webhook object: {webhook_object}",
-                "received_object": webhook_object
-            })
+            logger.warning(f"❓ Unknown webhook object: {webhook_data.get('object')}")
+            return JSONResponse({"status": "ignored", "reason": "Unknown webhook object"})
             
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"❌ UNEXPECTED ERROR processing webhook")
-        logger.error(f"   Error type: {type(e).__name__}")
-        logger.error(f"   Error message: {str(e)}")
-        logger.exception("Full traceback:")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Internal server error",
-                "error_type": type(e).__name__,
-                "error_message": str(e)
-            }
-        )
+        logger.error(f"❌ Webhook processing error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @app.get("/health")
 async def health_check():
+    """Enhanced health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0",
+        "version": "2.0.0",
         "bot_features": {
-            "domain_check": bool(DOMAIN_CHECK_URL),
-            "whatsapp_replies": bool(ACCESS_TOKEN and PHONE_NUMBER_ID),
+            "smart_domain_parsing": True,
+            "batch_domain_check": True,
             "interactive_buttons": True,
-            "active_users": len(user_states)
-        }
+            "domain_caching": True,
+            "conversation_flow": True,
+            "active_users": len(user_states),
+            "cached_domains": len(domain_cache)
+        },
+        "supported_extensions": list(DOMAIN_EXTENSIONS.keys())
     }
 
-@app.exception_handler(404)
-async def not_found_handler(request: Request, exc: HTTPException):
-    logger.warning(f"404 Not Found: {request.url}")
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": "Not found",
-            "path": str(request.url),
-            "method": request.method,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    )
+@app.get("/stats")
+async def get_stats():
+    """Get bot usage statistics"""
+    total_searches = sum(len(state.get("search_history", [])) for state in user_states.values())
+    
+    return {
+        "active_users": len(user_states),
+        "total_searches": total_searches,
+        "cached_domains": len(domain_cache),
+        "supported_extensions": len(DOMAIN_EXTENSIONS),
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
-@app.exception_handler(500)
-async def internal_error_handler(request: Request, exc: Exception):
-    logger.error(f"500 Internal Server Error: {exc}")
-    logger.exception("Full traceback:")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "timestamp": datetime.utcnow().isoformat(),
-            "error_type": type(exc).__name__
-        }
-    )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": exc.detail,
-            "status_code": exc.status_code,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    )
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 Smart WhatsApp Domain Bot Starting Up")
+    logger.info(f"   Supported Extensions: {len(DOMAIN_EXTENSIONS)}")
+    logger.info(f"   API Endpoint: {DOMAIN_CHECK_URL}")
+    logger.info("✅ Bot Ready!")
 
 if __name__ == "__main__":
     import uvicorn
     
-    logger.info("🚀 STARTING SERVER")
-    logger.info(f"   Port: {PORT}")
-    logger.info(f"   Host: 0.0.0.0")
-    logger.info(f"   Log Level: info")
-    
+    logger.info("🌟 Starting Smart Domain Bot Server")
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
