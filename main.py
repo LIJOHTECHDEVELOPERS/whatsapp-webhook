@@ -371,7 +371,8 @@ async def handle_webhook(request: Request):
                                             "include_pricing": "true",
                                             "include_suggestions": "true"
                                         }
-                                        logger.info(f"🔗 Calling domain API: {DOMAIN_CHECK_URL}?{ '&'.join([f'{k}={v}' for k, v in params.items()])}")
+                                        api_url = f"{DOMAIN_CHECK_URL}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+                                        logger.info(f"🔗 Calling domain API: {api_url}")
                                         async with aiohttp.ClientSession() as session:
                                             async with session.get(
                                                 DOMAIN_CHECK_URL,
@@ -381,20 +382,20 @@ async def handle_webhook(request: Request):
                                                 logger.info(f"📡 Domain API response status: {resp.status}")
                                                 if resp.status == 200:
                                                     api_response = await resp.json()
-                                                    logger.info(f"📊 Domain API response: {json.dumps(api_response, indent=2)[:500]}...")  # Log preview
+                                                    logger.info(f"📊 Domain API response preview: {json.dumps(api_response, indent=2)[:500]}...")
                                                     if api_response.get("success"):
                                                         domain_result = api_response.get("data", {})
                                                     else:
                                                         domain_result = {"error": api_response.get("error", "API error")}
                                                 else:
                                                     error_text = await resp.text()
-                                                    logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")  # Truncate long errors
+                                                    logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")
                                                     domain_result = {"error": f"HTTP {resp.status}: {error_text[:100] if len(error_text) > 100 else error_text}"}
                                     except Exception as domain_error:
                                         logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
                                         domain_result = {"error": "Service unavailable"}
                                     
-                                    # Format reply
+                                    # FIXED: Parse suggestions as list of dicts, extract 'domain'
                                     if domain_result.get("error"):
                                         reply_text = f"❌ Sorry, couldn't check {domain_query} right now ({domain_result['error']}). Try again later!"
                                     elif domain_result.get("available", False):
@@ -404,7 +405,10 @@ async def handle_webhook(request: Request):
                                         suggestions = domain_result.get("suggestions", [])
                                         reply_text = f"❌ {domain_query} is NOT available.\n\n"
                                         if suggestions:
-                                            reply_text += f"💡 Suggestions: {', '.join(suggestions[:3])}\n"
+                                            # Extract domain names from suggestion dicts
+                                            sug_domains = [s.get("domain", "") for s in suggestions if isinstance(s, dict)][:3]
+                                            if sug_domains:
+                                                reply_text += f"💡 Suggestions: {', '.join(sug_domains)}\n"
                                         reply_text += "Try another .ke domain!"
                                     
                                     if PHONE_NUMBER_ID and ACCESS_TOKEN:
