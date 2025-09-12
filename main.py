@@ -8,7 +8,7 @@ import sys
 import aiohttp
 from datetime import datetime
 from typing import Dict, Any
-from urllib.parse import quote  # For URL encoding domain
+from urllib.parse import quote  # For URL encoding domain params
 
 # Configure detailed logging
 logging.basicConfig(
@@ -27,10 +27,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware
+# Add CORS middleware (filter empty origins)
+allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://your-frontend-domain.com").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://your-frontend-domain.com").split(",") if origin.strip()],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -47,17 +48,8 @@ def debug_environment():
     logger.info(f"Environment variables count: {len(os.environ)}")
     
     env_vars = [
-        "WEBHOOK_VERIFY_TOKEN",
-        "APP_SECRET",
-        "ACCESS_TOKEN",
-        "PHONE_NUMBER_ID",
-        "VERSION",
-        "DOMAIN_CHECK_URL",
-        "ALLOWED_ORIGINS",
-        "PORT",
-        "RAILWAY_ENVIRONMENT",
-        "RAILWAY_PROJECT_ID",
-        "RAILWAY_SERVICE_ID"
+        "WEBHOOK_VERIFY_TOKEN", "APP_SECRET", "ACCESS_TOKEN", "PHONE_NUMBER_ID",
+        "VERSION", "DOMAIN_CHECK_URL", "ALLOWED_ORIGINS", "PORT"
     ]
     
     logger.info("\n📋 ENVIRONMENT VARIABLES:")
@@ -82,9 +74,6 @@ def debug_environment():
     
     logger.info("=" * 50)
 
-# Call debug function at startup
-debug_environment()
-
 # Get environment variables with better error handling
 def get_env_var(var_name: str, default: str = None, required: bool = False) -> str:
     """Get environment variable with detailed logging"""
@@ -104,7 +93,9 @@ def get_env_var(var_name: str, default: str = None, required: bool = False) -> s
     
     return value
 
-# Load environment variables
+# Load environment variables (single debug call here)
+debug_environment()
+
 try:
     WEBHOOK_VERIFY_TOKEN = get_env_var("WEBHOOK_VERIFY_TOKEN", "default_token")
     APP_SECRET = get_env_var("APP_SECRET", "")
@@ -112,8 +103,7 @@ try:
     PHONE_NUMBER_ID = get_env_var("PHONE_NUMBER_ID", None, required=False)
     VERSION = get_env_var("VERSION", "v19.0")
     DOMAIN_CHECK_URL = get_env_var("DOMAIN_CHECK_URL", "https://api.digikenya.co.ke/api/v1/domains/availability/check")
-    PORT = int(get_env_var("PORT", "8080"))  # Match Railway default
-    ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,https://your-frontend-domain.com")
+    PORT = int(get_env_var("PORT", "8080"))
     
     logger.info(f"🚀 Configuration loaded successfully")
     logger.info(f"   - Verify Token: {WEBHOOK_VERIFY_TOKEN[:10]}...")
@@ -122,7 +112,6 @@ try:
     logger.info(f"   - Phone Number ID: {PHONE_NUMBER_ID or 'NOT SET'}")
     logger.info(f"   - API Version: {VERSION}")
     logger.info(f"   - Domain Check URL: {DOMAIN_CHECK_URL}")
-    logger.info(f"   - Allowed Origins: {ALLOWED_ORIGINS}")
     logger.info(f"   - Port: {PORT}")
     
 except Exception as e:
@@ -134,9 +123,166 @@ async def startup_event():
     """Log startup information"""
     logger.info("🎉 APPLICATION STARTING UP")
     logger.info(f"FastAPI app starting at {datetime.utcnow().isoformat()}")
-    debug_environment()
 
-# ... (rest of your endpoints: /, /debug, /test-webhook, /webhook GET remain unchanged)
+@app.get("/")
+async def root():
+    """Root endpoint with comprehensive system info"""
+    return {
+        "status": "running",
+        "message": "WhatsApp Webhook Server with .ke Domain Bot is running!",
+        "timestamp": datetime.utcnow().isoformat(),
+        "system_info": {
+            "python_version": sys.version,
+            "cwd": os.getcwd(),
+            "port": PORT,
+            "railway_env": os.getenv("RAILWAY_ENVIRONMENT", "not_set"),
+            "railway_project": os.getenv("RAILWAY_PROJECT_ID", "not_set")
+        },
+        "configuration": {
+            "webhook_verify_token_set": bool(WEBHOOK_VERIFY_TOKEN and WEBHOOK_VERIFY_TOKEN != "default_token"),
+            "app_secret_set": bool(APP_SECRET),
+            "access_token_set": bool(ACCESS_TOKEN),
+            "phone_number_id_set": bool(PHONE_NUMBER_ID),
+            "domain_check_url_set": bool(DOMAIN_CHECK_URL),
+            "using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token"
+        },
+        "endpoints": {
+            "health": "/health",
+            "webhook": "/webhook",
+            "debug": "/debug",
+            "test-webhook": "/test-webhook",
+            "docs": "/docs"
+        }
+    }
+
+@app.get("/debug")
+async def debug_info():
+    """Comprehensive debug information"""
+    logger.info("🔍 Debug info requested")
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "environment": {
+            "python_version": sys.version,
+            "working_directory": os.getcwd(),
+            "total_env_vars": len(os.environ),
+            "railway_specific": {
+                var: os.getenv(var, "not_set")
+                for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID"]
+            }
+        },
+        "configuration": {
+            "webhook_verify_token": {
+                "is_set": bool(WEBHOOK_VERIFY_TOKEN),
+                "is_default": WEBHOOK_VERIFY_TOKEN == "default_token",
+                "length": len(WEBHOOK_VERIFY_TOKEN) if WEBHOOK_VERIFY_TOKEN else 0,
+                "preview": f"{WEBHOOK_VERIFY_TOKEN[:10]}..." if WEBHOOK_VERIFY_TOKEN and len(WEBHOOK_VERIFY_TOKEN) > 10 else WEBHOOK_VERIFY_TOKEN
+            },
+            "app_secret": {
+                "is_set": bool(APP_SECRET),
+                "length": len(APP_SECRET) if APP_SECRET else 0
+            },
+            "access_token": {
+                "is_set": bool(ACCESS_TOKEN),
+                "length": len(ACCESS_TOKEN) if ACCESS_TOKEN else 0
+            },
+            "phone_number_id": {
+                "is_set": bool(PHONE_NUMBER_ID),
+                "value": PHONE_NUMBER_ID or "NOT SET"
+            },
+            "version": VERSION,
+            "domain_check_url": DOMAIN_CHECK_URL,
+            "port": PORT
+        },
+        "warnings": [
+            warning for warning in [
+                "Using default WEBHOOK_VERIFY_TOKEN" if WEBHOOK_VERIFY_TOKEN == "default_token" else None,
+                "APP_SECRET not set" if not APP_SECRET else None,
+                "ACCESS_TOKEN not set" if not ACCESS_TOKEN else None,
+                "PHONE_NUMBER_ID not set" if not PHONE_NUMBER_ID else None,
+                "DOMAIN_CHECK_URL not set" if not DOMAIN_CHECK_URL else None,
+            ] if warning
+        ],
+        "railway_env_check": {
+            "all_env_vars_count": len(os.environ),
+            "railway_vars": {
+                var: os.getenv(var, "NOT_SET")
+                for var in ["RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"]
+            }
+        }
+    }
+
+@app.get("/test-webhook")
+async def test_webhook_verification():
+    """Test webhook verification with detailed info"""
+    logger.info("🧪 Test webhook verification requested")
+    
+    test_info = {
+        "webhook_verify_token": WEBHOOK_VERIFY_TOKEN,
+        "is_using_default_token": WEBHOOK_VERIFY_TOKEN == "default_token",
+        "app_secret_set": bool(APP_SECRET),
+        "access_token_set": bool(ACCESS_TOKEN),
+        "phone_number_id_set": bool(PHONE_NUMBER_ID),
+        "domain_check_url": DOMAIN_CHECK_URL,
+        "test_verification_url": f"/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
+        "full_test_url": f"https://whatsapp-webhook-production-9ced.up.railway.app/webhook?hub.mode=subscribe&hub.verify_token={WEBHOOK_VERIFY_TOKEN}&hub.challenge=test123",
+        "warnings": []
+    }
+    
+    if WEBHOOK_VERIFY_TOKEN == "default_token":
+        test_info["warnings"].append("⚠️ Using default verification token - change in production!")
+    if not APP_SECRET:
+        test_info["warnings"].append("⚠️ APP_SECRET not configured")
+    if not ACCESS_TOKEN:
+        test_info["warnings"].append("⚠️ ACCESS_TOKEN not configured")
+    if not PHONE_NUMBER_ID:
+        test_info["warnings"].append("⚠️ PHONE_NUMBER_ID not configured - replies disabled")
+    if not DOMAIN_CHECK_URL:
+        test_info["warnings"].append("⚠️ DOMAIN_CHECK_URL not configured")
+    
+    logger.info(f"Test info: {json.dumps(test_info, indent=2)}")
+    return test_info
+
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge: str = Query(None, alias="hub.challenge")
+):
+    """Webhook verification for WhatsApp with detailed debugging"""
+    logger.info("🔐 WEBHOOK VERIFICATION REQUEST")
+    logger.info(f"   Hub Mode: '{hub_mode}'")
+    logger.info(f"   Hub Verify Token: '{hub_verify_token}'")
+    logger.info(f"   Hub Challenge: '{hub_challenge}'")
+    logger.info(f"   Expected Token: '{WEBHOOK_VERIFY_TOKEN}'")
+    logger.info(f"   Token Match: {hub_verify_token == WEBHOOK_VERIFY_TOKEN}")
+    
+    if not hub_mode:
+        logger.error("❌ hub.mode parameter missing")
+        raise HTTPException(status_code=400, detail="hub.mode parameter is required")
+    if not hub_verify_token:
+        logger.error("❌ hub.verify_token parameter missing")
+        raise HTTPException(status_code=400, detail="hub.verify_token parameter is required")
+    if not hub_challenge:
+        logger.error("❌ hub.challenge parameter missing")
+        raise HTTPException(status_code=400, detail="hub.challenge parameter is required")
+    
+    if hub_mode == "subscribe" and hub_verify_token == WEBHOOK_VERIFY_TOKEN:
+        logger.info("✅ Webhook verified successfully!")
+        logger.info(f"   Returning challenge: '{hub_challenge}'")
+        return PlainTextResponse(hub_challenge)
+    else:
+        logger.error(f"❌ Webhook verification failed - {'Invalid token' if hub_mode == 'subscribe' else 'Invalid hub.mode'}")
+        logger.error(f"   Expected: '{WEBHOOK_VERIFY_TOKEN}'")
+        logger.error(f"   Received: '{hub_verify_token}'")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Verification failed",
+                "expected_token": WEBHOOK_VERIFY_TOKEN,
+                "received_token": hub_verify_token
+            }
+        )
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
@@ -217,29 +363,32 @@ async def handle_webhook(request: Request):
                                     domain_query = text_body if text_body.endswith('.ke') else f"{text_body}.ke"
                                     logger.info(f"🤖 Domain check requested: {domain_query}")
                                     
-                                    # FIXED: Use GET with query params instead of POST
+                                    # FIXED: Use GET with query params (URL-encoded domain)
                                     domain_result = {"available": False, "error": "Unknown error"}
                                     try:
                                         params = {
-                                            "domain": domain_query,
+                                            "domain": quote(domain_query),  # URL-safe encode
                                             "include_pricing": "true",
                                             "include_suggestions": "true"
                                         }
+                                        logger.info(f"🔗 Calling domain API: {DOMAIN_CHECK_URL}?{ '&'.join([f'{k}={v}' for k, v in params.items()])}")
                                         async with aiohttp.ClientSession() as session:
                                             async with session.get(
                                                 DOMAIN_CHECK_URL,
                                                 params=params,
                                                 timeout=aiohttp.ClientTimeout(total=10)
                                             ) as resp:
+                                                logger.info(f"📡 Domain API response status: {resp.status}")
                                                 if resp.status == 200:
                                                     api_response = await resp.json()
+                                                    logger.info(f"📊 Domain API response: {json.dumps(api_response, indent=2)[:500]}...")  # Log preview
                                                     if api_response.get("success"):
                                                         domain_result = api_response.get("data", {})
                                                     else:
                                                         domain_result = {"error": api_response.get("error", "API error")}
                                                 else:
                                                     error_text = await resp.text()
-                                                    logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")  # Log first 500 chars
+                                                    logger.error(f"Domain API failed: {resp.status} - {error_text[:500]}...")  # Truncate long errors
                                                     domain_result = {"error": f"HTTP {resp.status}: {error_text[:100] if len(error_text) > 100 else error_text}"}
                                     except Exception as domain_error:
                                         logger.error(f"Domain check exception: {str(domain_error)}", exc_info=True)
@@ -377,7 +526,43 @@ async def health_check():
         }
     }
 
-# ... (exception handlers remain unchanged)
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    logger.warning(f"404 Not Found: {request.url}")
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Not found",
+            "path": str(request.url),
+            "method": request.method,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+
+@app.exception_handler(500)
+async def internal_error_handler(request: Request, exc: Exception):
+    logger.error(f"500 Internal Server Error: {exc}")
+    logger.exception("Full traceback:")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "timestamp": datetime.utcnow().isoformat(),
+            "error_type": type(exc).__name__
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
 
 if __name__ == "__main__":
     import uvicorn
