@@ -6,7 +6,7 @@ import os
 import logging
 import sys
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from urllib.parse import quote, urlencode
 import re
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title="Smart WhatsApp Domain Bot",
-    description="Intelligent WhatsApp Business API Bot for .ke Domain Search",
-    version="2.0.0"
+    description="Intelligent WhatsApp Business API Bot for .ke Domain Search with Message Status Tracking",
+    version="2.1.0"
 )
 
 # Add CORS middleware
@@ -52,7 +52,11 @@ DOMAIN_EXTENSIONS = {
 
 # Enhanced user state management
 user_states: Dict[str, Dict[str, Any]] = {}
-domain_cache: Dict[str, Dict[str, Any]] = {}  # Cache API results
+domain_cache: Dict[str, Dict[str, Any]] = {}
+
+# MESSAGE STATUS TRACKING - New feature
+message_statuses: Dict[str, Dict[str, Any]] = {}  # Store message delivery statuses
+MAX_STATUS_RECORDS = 1000  # Limit to prevent memory overflow
 
 # Smart domain parsing patterns
 DOMAIN_PATTERNS = {
@@ -88,6 +92,37 @@ try:
 except Exception as e:
     logger.error(f" Configuration error: {e}")
     raise
+
+def store_message_status(message_id: str, status: str, recipient: str, timestamp: str, metadata: Dict = None):
+    """Store message delivery status with automatic cleanup"""
+    # Cleanup old records if limit exceeded
+    if len(message_statuses) >= MAX_STATUS_RECORDS:
+        # Remove oldest 100 records
+        sorted_keys = sorted(message_statuses.keys(), 
+                           key=lambda k: message_statuses[k].get('last_updated', ''))
+        for key in sorted_keys[:100]:
+            del message_statuses[key]
+    
+    # Store or update status
+    if message_id not in message_statuses:
+        message_statuses[message_id] = {
+            "message_id": message_id,
+            "recipient": recipient,
+            "status_history": [],
+            "created_at": timestamp,
+            "last_updated": timestamp,
+            "metadata": metadata or {}
+        }
+    
+    # Add status to history
+    message_statuses[message_id]["status_history"].append({
+        "status": status,
+        "timestamp": timestamp
+    })
+    message_statuses[message_id]["current_status"] = status
+    message_statuses[message_id]["last_updated"] = timestamp
+    
+    logger.info(f"📊 Status stored: {message_id} -> {status} (recipient: {recipient})")
 
 class SmartDomainBot:
     """Enhanced domain bot with intelligent conversation flow"""
@@ -190,7 +225,7 @@ class SmartDomainBot:
                 params = {
                     "domain": quote(domain),
                     "include_pricing": "true",
-                    "include_suggestions": "false"  # Reduce API response size
+                    "include_suggestions": "false"
                 }
                 
                 async with aiohttp.ClientSession() as session:
@@ -240,7 +275,7 @@ class SmartDomainBot:
         # Available domains (priority)
         if available:
             message_parts.append(" *AVAILABLE DOMAINS*")
-            for domain_info in available[:5]:  # Limit to top 5
+            for domain_info in available[:5]:
                 domain = domain_info.get("domain", "")
                 price = domain_info.get("price", domain_info.get("pricing", {}).get("first_year", "Contact us"))
                 extension = "." + domain.split(".", 1)[1] if "." in domain else ""
@@ -272,7 +307,7 @@ class SmartDomainBot:
         return result_message
 
     async def send_interactive_message(self, to: str, message: str, buttons: List[Dict] = None, replied_msg_id: str = None):
-        """Send enhanced interactive message with better formatting"""
+        """Send enhanced interactive message with better formatting and status tracking"""
         if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
             logger.error(" Cannot send message - credentials missing")
             return False
@@ -282,12 +317,12 @@ class SmartDomainBot:
         # Format buttons for WhatsApp API
         if buttons:
             formatted_buttons = []
-            for i, btn in enumerate(buttons[:3]):  # WhatsApp allows max 3 buttons
+            for i, btn in enumerate(buttons[:3]):
                 formatted_buttons.append({
                     "type": "reply",
                     "reply": {
                         "id": btn.get("id", f"btn_{i}"),
-                        "title": btn.get("title", "Button")[:20]  # 20 char limit
+                        "title": btn.get("title", "Button")[:20]
                     }
                 })
             
@@ -298,7 +333,7 @@ class SmartDomainBot:
                 "type": "interactive",
                 "interactive": {
                     "type": "button",
-                    "body": {"text": message[:1024]},  # WhatsApp limit
+                    "body": {"text": message[:1024]},
                     "action": {"buttons": formatted_buttons}
                 }
             }
@@ -326,6 +361,21 @@ class SmartDomainBot:
                         result = await resp.json()
                         msg_id = result.get('messages', [{}])[0].get('id')
                         logger.info(f" Message sent to {to}: ID {msg_id}")
+                        
+                        # Store initial status
+                        if msg_id:
+                            store_message_status(
+                                message_id=msg_id,
+                                status="sent",
+                                recipient=to,
+                                timestamp=datetime.utcnow().isoformat(),
+                                metadata={
+                                    "message_type": "interactive" if buttons else "text",
+                                    "has_buttons": bool(buttons),
+                                    "source": "bot"
+                                }
+                            )
+                        
                         return True
                     else:
                         error_text = await resp.text()
@@ -350,7 +400,6 @@ class SmartDomainBot:
         
         # Handle domain search
         if current_step in ["greeting", "searching"] or text.startswith(("check", "search", "find")):
-            # Extract domain from text (remove common prefixes)
             domain_text = re.sub(r'^(check|search|find|domain)\s+', '', text, flags=re.IGNORECASE).strip()
             
             if domain_text:
@@ -414,7 +463,6 @@ class SmartDomainBot:
 
     async def process_domain_search(self, sender: str, domain_input: str, message_id: str, show_all: bool = False):
         """Process domain search with intelligent parsing"""
-        # Parse the domain input
         parsed = self.parse_domain_input(domain_input)
         
         if parsed["type"] == "invalid":
@@ -432,24 +480,18 @@ class SmartDomainBot:
         base_domain = parsed["base"]
         domains_to_check = parsed["domains_to_check"]
         
-        # Update user state
         self.update_user_state(sender, {
             "step": "searching",
             "current_domain": base_domain
         })
         
-        # Send "searching" message
         search_count = len(domains_to_check)
         searching_text = f" Searching {search_count} domain{'s' if search_count > 1 else ''} for '*{base_domain}*'...\n\nThis may take a moment "
         await self.send_interactive_message(sender, searching_text, replied_msg_id=message_id)
         
-        # Check domains
         results = await self.check_domains_batch(domains_to_check)
-        
-        # Format and send results
         results_text = self.format_domain_results(results, base_domain)
         
-        # Add interactive buttons based on results
         buttons = []
         if results.get("available"):
             buttons.append({"id": "register_domain", "title": " Register Now"})
@@ -461,7 +503,6 @@ class SmartDomainBot:
         
         await self.send_interactive_message(sender, results_text, buttons)
         
-        # Update state with results
         self.update_user_state(sender, {
             "step": "results",
             "last_results": results,
@@ -548,7 +589,7 @@ async def verify_webhook(
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Enhanced webhook handler with smart conversation flow"""
+    """Enhanced webhook handler with message status tracking"""
     logger.info(" Incoming webhook")
     try:
         body = await request.body()
@@ -563,16 +604,50 @@ async def handle_webhook(request: Request):
                 changes = entry.get("changes", [])
                 
                 for change in changes:
+                    value = change.get("value", {})
+                    
+                    # Handle message status updates
                     if change.get("field") == "messages":
-                        value = change.get("value", {})
-                        messages = value.get("messages", [])
+                        statuses = value.get("statuses", [])
+                        for status_update in statuses:
+                            msg_id = status_update.get("id")
+                            status = status_update.get("status")
+                            timestamp = status_update.get("timestamp")
+                            recipient = status_update.get("recipient_id")
+                            
+                            if msg_id and status:
+                                store_message_status(
+                                    message_id=msg_id,
+                                    status=status,
+                                    recipient=recipient,
+                                    timestamp=datetime.fromtimestamp(int(timestamp)).isoformat() if timestamp else datetime.utcnow().isoformat(),
+                                    metadata={
+                                        "pricing": status_update.get("pricing"),
+                                        "conversation": status_update.get("conversation"),
+                                        "errors": status_update.get("errors", [])
+                                    }
+                                )
                         
+                        # Handle incoming messages
+                        messages = value.get("messages", [])
                         for message in messages:
                             sender = message.get("from")
                             msg_type = message.get("type")
                             msg_id = message.get("id")
                             
                             logger.info(f" Message from {sender} (type: {msg_type})")
+                            
+                            # Store incoming message status
+                            store_message_status(
+                                message_id=msg_id,
+                                status="received",
+                                recipient=sender,
+                                timestamp=datetime.utcnow().isoformat(),
+                                metadata={
+                                    "message_type": msg_type,
+                                    "direction": "incoming"
+                                }
+                            )
                             
                             # Handle interactive button responses
                             if msg_type == "interactive":
@@ -609,33 +684,289 @@ async def handle_webhook(request: Request):
         logger.error(f" Webhook processing error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
+# NEW ENDPOINTS FOR MESSAGE STATUS TRACKING
+
+@app.get("/api/messages/status")
+async def get_all_message_statuses(
+    limit: int = Query(50, ge=1, le=500),
+    status: Optional[str] = Query(None),
+    recipient: Optional[str] = Query(None)
+):
+    """
+    Get all message delivery statuses with optional filtering
+    
+    Query parameters:
+    - limit: Maximum number of records to return (1-500, default 50)
+    - status: Filter by status (sent, delivered, read, failed)
+    - recipient: Filter by recipient phone number
+    """
+    filtered_statuses = list(message_statuses.values())
+    
+    # Apply filters
+    if status:
+        filtered_statuses = [
+            msg for msg in filtered_statuses 
+            if msg.get("current_status") == status
+        ]
+    
+    if recipient:
+        filtered_statuses = [
+            msg for msg in filtered_statuses 
+            if msg.get("recipient") == recipient
+        ]
+    
+    # Sort by most recent first
+    filtered_statuses.sort(
+        key=lambda x: x.get("last_updated", ""), 
+        reverse=True
+    )
+    
+    # Apply limit
+    filtered_statuses = filtered_statuses[:limit]
+    
+    return {
+        "success": True,
+        "count": len(filtered_statuses),
+        "total_tracked": len(message_statuses),
+        "messages": filtered_statuses
+    }
+
+@app.get("/api/messages/status/{message_id}")
+async def get_message_status(message_id: str):
+    """
+    Get detailed status for a specific message ID
+    
+    Returns complete status history and metadata
+    """
+    if message_id not in message_statuses:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Message ID {message_id} not found"
+        )
+    
+    return {
+        "success": True,
+        "message": message_statuses[message_id]
+    }
+
+@app.get("/api/messages/statistics")
+async def get_message_statistics(
+    hours: int = Query(24, ge=1, le=168)
+):
+    """
+    Get message delivery statistics for the specified time period
+    
+    Query parameters:
+    - hours: Number of hours to include in statistics (1-168, default 24)
+    """
+    cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+    cutoff_iso = cutoff_time.isoformat()
+    
+    # Filter messages within time period
+    recent_messages = [
+        msg for msg in message_statuses.values()
+        if msg.get("last_updated", "") >= cutoff_iso
+    ]
+    
+    # Count by status
+    status_counts = {
+        "sent": 0,
+        "delivered": 0,
+        "read": 0,
+        "failed": 0,
+        "received": 0
+    }
+    
+    for msg in recent_messages:
+        current_status = msg.get("current_status", "unknown")
+        if current_status in status_counts:
+            status_counts[current_status] += 1
+        else:
+            status_counts[current_status] = status_counts.get(current_status, 0) + 1
+    
+    # Calculate delivery rate
+    total_sent = status_counts.get("sent", 0) + status_counts.get("delivered", 0) + status_counts.get("read", 0)
+    delivered = status_counts.get("delivered", 0) + status_counts.get("read", 0)
+    delivery_rate = (delivered / total_sent * 100) if total_sent > 0 else 0
+    
+    # Calculate read rate
+    read_count = status_counts.get("read", 0)
+    read_rate = (read_count / delivered * 100) if delivered > 0 else 0
+    
+    # Count by recipient
+    recipient_counts = {}
+    for msg in recent_messages:
+        recipient = msg.get("recipient", "unknown")
+        recipient_counts[recipient] = recipient_counts.get(recipient, 0) + 1
+    
+    # Get top recipients
+    top_recipients = sorted(
+        recipient_counts.items(), 
+        key=lambda x: x[1], 
+        reverse=True
+    )[:10]
+    
+    return {
+        "success": True,
+        "period_hours": hours,
+        "total_messages": len(recent_messages),
+        "status_breakdown": status_counts,
+        "metrics": {
+            "delivery_rate": round(delivery_rate, 2),
+            "read_rate": round(read_rate, 2),
+            "failed_count": status_counts.get("failed", 0)
+        },
+        "top_recipients": [
+            {"recipient": r[0], "message_count": r[1]} 
+            for r in top_recipients
+        ]
+    }
+
+@app.get("/api/messages/recipient/{phone_number}")
+async def get_recipient_messages(
+    phone_number: str,
+    limit: int = Query(20, ge=1, le=100)
+):
+    """
+    Get all messages for a specific recipient phone number
+    
+    Useful for tracking conversation history and delivery status
+    """
+    recipient_messages = [
+        msg for msg in message_statuses.values()
+        if msg.get("recipient") == phone_number
+    ]
+    
+    # Sort by most recent first
+    recipient_messages.sort(
+        key=lambda x: x.get("last_updated", ""), 
+        reverse=True
+    )
+    
+    recipient_messages = recipient_messages[:limit]
+    
+    # Calculate statistics for this recipient
+    status_counts = {}
+    for msg in recipient_messages:
+        status = msg.get("current_status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    
+    return {
+        "success": True,
+        "recipient": phone_number,
+        "message_count": len(recipient_messages),
+        "status_breakdown": status_counts,
+        "messages": recipient_messages
+    }
+
+@app.delete("/api/messages/status/cleanup")
+async def cleanup_old_statuses(
+    days: int = Query(7, ge=1, le=30)
+):
+    """
+    Clean up message statuses older than specified days
+    
+    Query parameters:
+    - days: Remove statuses older than this many days (1-30, default 7)
+    """
+    cutoff_time = datetime.utcnow() - timedelta(days=days)
+    cutoff_iso = cutoff_time.isoformat()
+    
+    initial_count = len(message_statuses)
+    
+    # Remove old entries
+    keys_to_delete = [
+        msg_id for msg_id, msg_data in message_statuses.items()
+        if msg_data.get("last_updated", "") < cutoff_iso
+    ]
+    
+    for key in keys_to_delete:
+        del message_statuses[key]
+    
+    removed_count = len(keys_to_delete)
+    
+    logger.info(f"🗑️ Cleaned up {removed_count} old message statuses")
+    
+    return {
+        "success": True,
+        "removed_count": removed_count,
+        "remaining_count": len(message_statuses),
+        "cutoff_date": cutoff_iso
+    }
+
+@app.get("/api/messages/failed")
+async def get_failed_messages(
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Get all failed messages for troubleshooting
+    
+    Returns messages with 'failed' status including error details
+    """
+    failed_messages = [
+        msg for msg in message_statuses.values()
+        if msg.get("current_status") == "failed"
+    ]
+    
+    # Sort by most recent first
+    failed_messages.sort(
+        key=lambda x: x.get("last_updated", ""), 
+        reverse=True
+    )
+    
+    failed_messages = failed_messages[:limit]
+    
+    # Extract error information
+    for msg in failed_messages:
+        errors = msg.get("metadata", {}).get("errors", [])
+        if errors:
+            msg["error_details"] = errors
+    
+    return {
+        "success": True,
+        "failed_count": len(failed_messages),
+        "total_tracked": len(message_statuses),
+        "messages": failed_messages
+    }
+
 @app.get("/health")
 async def health_check():
     """Enhanced health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "2.0.0",
+        "version": "2.1.0",
         "bot_features": {
             "smart_domain_parsing": True,
             "batch_domain_check": True,
             "interactive_buttons": True,
             "domain_caching": True,
             "conversation_flow": True,
+            "message_status_tracking": True,
             "active_users": len(user_states),
-            "cached_domains": len(domain_cache)
+            "cached_domains": len(domain_cache),
+            "tracked_messages": len(message_statuses)
         },
         "supported_extensions": list(DOMAIN_EXTENSIONS.keys())
     }
 
 @app.get("/stats")
 async def get_stats():
-    """Get bot usage statistics"""
+    """Get comprehensive bot usage statistics"""
     total_searches = sum(len(state.get("search_history", [])) for state in user_states.values())
+    
+    # Message status breakdown
+    status_breakdown = {}
+    for msg in message_statuses.values():
+        status = msg.get("current_status", "unknown")
+        status_breakdown[status] = status_breakdown.get(status, 0) + 1
+    
     return {
         "active_users": len(user_states),
         "total_searches": total_searches,
         "cached_domains": len(domain_cache),
+        "tracked_messages": len(message_statuses),
+        "message_status_breakdown": status_breakdown,
         "supported_extensions": len(DOMAIN_EXTENSIONS),
         "timestamp": datetime.utcnow().isoformat()
     }
@@ -645,6 +976,8 @@ async def startup_event():
     logger.info(" Smart WhatsApp Domain Bot Starting Up")
     logger.info(f"   Supported Extensions: {len(DOMAIN_EXTENSIONS)}")
     logger.info(f"   API Endpoint: {DOMAIN_CHECK_URL}")
+    logger.info(f"   Message Status Tracking: Enabled")
+    logger.info(f"   Max Status Records: {MAX_STATUS_RECORDS}")
     logger.info(" Bot Ready!")
 
 if __name__ == "__main__":
