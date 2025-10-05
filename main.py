@@ -861,20 +861,38 @@ async def get_recipient_messages(
 
 @app.delete("/api/messages/status/cleanup")
 async def cleanup_old_statuses(
-    days: int = Query(7, ge=1, le=30)
+    days: int = Query(7, ge=0, le=30),
+    all: bool = Query(False)
 ):
     """
     Clean up message statuses older than specified days
     
     Query parameters:
-    - days: Remove statuses older than this many days (1-30, default 7)
+    - days: Remove statuses older than this many days (0-30, default 7)
+    - all: If true, removes ALL message statuses regardless of age
+    
+    Special cases:
+    - days=0 or all=true: Removes ALL message statuses
     """
+    initial_count = len(message_statuses)
+    
+    # Clear all if requested
+    if all or days == 0:
+        message_statuses.clear()
+        removed_count = initial_count
+        logger.info(f"🗑️ Cleared ALL {removed_count} message statuses")
+        
+        return {
+            "success": True,
+            "removed_count": removed_count,
+            "remaining_count": 0,
+            "action": "cleared_all"
+        }
+    
+    # Remove old entries by date
     cutoff_time = datetime.utcnow() - timedelta(days=days)
     cutoff_iso = cutoff_time.isoformat()
     
-    initial_count = len(message_statuses)
-    
-    # Remove old entries
     keys_to_delete = [
         msg_id for msg_id, msg_data in message_statuses.items()
         if msg_data.get("last_updated", "") < cutoff_iso
@@ -891,7 +909,8 @@ async def cleanup_old_statuses(
         "success": True,
         "removed_count": removed_count,
         "remaining_count": len(message_statuses),
-        "cutoff_date": cutoff_iso
+        "cutoff_date": cutoff_iso,
+        "action": "cleaned_by_date"
     }
 
 @app.get("/api/messages/failed")
